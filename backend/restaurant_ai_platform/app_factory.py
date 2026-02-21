@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, jsonify
 
 
 def create_app():
@@ -6,6 +6,10 @@ def create_app():
 
     @app.route("/")
     def home():
-        return {"message": "Restaurant AI Platform Backend is running"}
+        return jsonify({"message": "Restaurant AI Platform Backend is running"})
+
+    @app.route("/health")
+    def health():
+        return jsonify({"status": "ok"})
 
     return app
