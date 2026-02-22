@@ -46,20 +46,41 @@ def run_step(step_name: str) -> Dict[str, Any]:
     fn = registry.get(step_name)
     if fn is None:
         _log(f"SKIP  {step_name} (no handler registered)")
-        return {"step": step_name, "status": "skipped", "reason": "no_handler", "timestamp": _utc_ts()}
+        return {
+            "step": step_name,
+            "status": "skipped",
+            "reason": "no_handler",
+            "timestamp": _utc_ts(),
+        }
 
     try:
         result = fn()
         _log(f"DONE  {step_name}")
-        return {"step": step_name, "status": "ok", "result": result, "timestamp": _utc_ts()}
-    except ModuleNotFoundError as e:
-        # When the step module file isn't created yet
-        _log(f"SKIP  {step_name} (module not found: {e})")
-        return {"step": step_name, "status": "skipped", "reason": "module_not_found", "error": str(e), "timestamp": _utc_ts()}
+        return {
+            "step": step_name,
+            "status": "ok",
+            "result": result,
+            "timestamp": _utc_ts(),
+        }
+    except ImportError as e:
+        # Covers ModuleNotFoundError and other import-related errors
+        _log(f"SKIP  {step_name} (import error: {e})")
+        return {
+            "step": step_name,
+            "status": "skipped",
+            "reason": "import_error",
+            "error": str(e),
+            "timestamp": _utc_ts(),
+        }
     except Exception as e:
-        # Keep pipeline alive even if one step fails
         _log(f"ERROR {step_name} ({type(e).__name__}: {e})")
-        return {"step": step_name, "status": "error", "error_type": type(e).__name__, "error": str(e), "timestamp": _utc_ts()}
+        return {
+            "step": step_name,
+            "status": "error",
+            "error_type": type(e).__name__,
+            "error": str(e),
+            "timestamp": _utc_ts(),
+        }
 
 
 def run_pipeline() -> Dict[str, Any]:
@@ -71,48 +92,52 @@ def run_pipeline() -> Dict[str, Any]:
 
 def _run_data_ingestion() -> Dict[str, Any]:
     from . import data_ingestion
+
     return data_ingestion.run()
 
 
 def _run_data_warehouse() -> Dict[str, Any]:
     from . import data_warehouse
+
     return data_warehouse.run()
 
 
 def _run_feature_engineering() -> Dict[str, Any]:
     from . import feature_engineering
+
     return feature_engineering.run()
 
 
 def _run_feature_store_sync() -> Dict[str, Any]:
-    # This file can be added later: feature_store_sync.py
     from . import feature_store_sync
+
     return feature_store_sync.run()
 
 
 def _run_ml_prediction() -> Dict[str, Any]:
-    # This file can be added later: ml_prediction.py
     from . import ml_prediction
+
     return ml_prediction.run()
 
 
 def _run_optimization() -> Dict[str, Any]:
-    # This file can be added later: optimization.py
     from . import optimization
+
     return optimization.run()
 
 
 def _run_api_serving() -> Dict[str, Any]:
-    # This file can be added later: api_serving.py
     from . import api_serving
+
     return api_serving.run()
 
 
 def _run_dashboard_update() -> Dict[str, Any]:
-    # This file can be added later: dashboard_update.py
     from . import dashboard_update
+
     return dashboard_update.run()
 
 
 if __name__ == "__main__":
-    run_pipeline()
+    output = run_pipeline()
+    print(output)
