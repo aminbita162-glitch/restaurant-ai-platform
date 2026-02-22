@@ -1,5 +1,7 @@
 from flask import Flask, jsonify
 
+from . import api_serving
+
 
 def create_app():
     app = Flask(__name__)
@@ -8,8 +10,7 @@ def create_app():
     def home():
         return jsonify({"message": "Restaurant AI Platform Backend is running"})
 
-    @app.route("/health")
-    def health():
-        return jsonify({"status": "ok"})
+    # Register API blueprint (health + pipeline endpoints)
+    api_serving.register(app)
 
     return app
