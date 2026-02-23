@@ -51,14 +51,11 @@ def _normalize_steps(value: Any) -> Optional[List[str]]:
         cleaned = [s for s in cleaned if s]
         return cleaned or None
 
-    # fallback
     s = str(value).strip()
     return [s] if s else None
 
 
-def _select_plan(
-    requested_steps: Optional[List[str]],
-) -> Tuple[List[str], List[str]]:
+def _select_plan(requested_steps: Optional[List[str]]) -> Tuple[List[str], List[str]]:
     """
     Returns (plan, unknown_steps)
     - plan is filtered to valid steps
@@ -77,7 +74,7 @@ def _select_plan(
         else:
             unknown.append(s)
 
-    # remove duplicates while keeping order (optional but nice)
+    # remove duplicates while keeping order
     seen: set[str] = set()
     unique_plan: List[str] = []
     for s in plan:
@@ -93,6 +90,46 @@ def _select_plan(
             seen2.add(s)
 
     return unique_plan, unique_unknown
+
+
+def _apply_start_stop(plan: List[str], start_at: Optional[str], stop_after: Optional[str]) -> List[str]:
+    """
+    Applies start_at and stop_after on a plan.
+    - start_at: trims everything before it (inclusive start)
+    - stop_after: trims everything after it (inclusive end)
+    If step not found, returns plan unchanged (validation is handled elsewhere if strict).
+    """
+    out = list(plan)
+
+    if start_at:
+        if start_at in out:
+            out = out[out.index(start_at) :]
+
+    if stop_after:
+        if stop_after in out:
+            out = out[: out.index(stop_after) + 1]
+
+    return out
+
+
+def _apply_exclude(plan: List[str], exclude: Optional[List[str]]) -> List[str]:
+    if not exclude:
+        return plan
+    ex = set(exclude)
+    return [s for s in plan if s not in ex]
+
+
+def _normalize_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    s = str(value).strip().lower()
+    if s in {"1", "true", "yes", "y", "on"}:
+        return True
+    if s in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
 
 
 def run_step(step_name: str) -> Dict[str, Any]:
@@ -154,61 +191,120 @@ def run_step(step_name: str) -> Dict[str, Any]:
 
 
 def run_pipeline(
+    options: Any = None,
     *,
     steps: Any = None,
+    exclude: Any = None,
+    start_at: Optional[str] = None,
+    stop_after: Optional[str] = None,
     dry_run: bool = False,
+    stop_on_error: bool = False,
     strict: bool = True,
 ) -> Dict[str, Any]:
     """
-    steps:
-      - None => run full PIPELINE_ORDER
-      - list / "comma,separated" => run selected steps (valid ones)
+    Supports BOTH:
+      - run_pipeline({"steps":[...], "dry_run": True, ...})
+      - run_pipeline(steps=[...], dry_run=True, ...)
 
-    dry_run:
-      - True => only returns plan, does not execute steps
-
-    strict:
-      - True  => if unknown steps exist => status=error (no execution)
-      - False => unknown steps are ignored; execution continues with valid plan
+    options keys (optional):
+      - steps: list[str] or "a,b,c"
+      - exclude: list[str] or "a,b"
+      - start_at: str
+      - stop_after: str
+      - dry_run: bool
+      - stop_on_error: bool
+      - strict: bool
     """
+    # Merge dict options if provided
+    if isinstance(options, dict):
+        if steps is None and "steps" in options:
+            steps = options.get("steps")
+        if exclude is None and "exclude" in options:
+            exclude = options.get("exclude")
+        if start_at is None and "start_at" in options:
+            start_at = options.get("start_at")
+        if stop_after is None and "stop_after" in options:
+            stop_after = options.get("stop_after")
+        dry_run = _normalize_bool(options.get("dry_run"), default=dry_run)
+        stop_on_error = _normalize_bool(options.get("stop_on_error"), default=stop_on_error)
+        strict = _normalize_bool(options.get("strict"), default=strict)
+
     requested_steps = _normalize_steps(steps)
+    requested_exclude = _normalize_steps(exclude)
+
     plan, unknown_steps = _select_plan(requested_steps)
+
+    # Validate special selectors if strict
+    selector_unknown: List[str] = []
+    if start_at and start_at not in PIPELINE_ORDER:
+        selector_unknown.append(start_at)
+    if stop_after and stop_after not in PIPELINE_ORDER:
+        selector_unknown.append(stop_after)
+    if requested_exclude:
+        for ex in requested_exclude:
+            if ex not in PIPELINE_ORDER:
+                selector_unknown.append(ex)
+
+    # Deduplicate selector_unknown
+    sel_seen: set[str] = set()
+    selector_unknown = [s for s in selector_unknown if not (s in sel_seen or sel_seen.add(s))]
 
     base: Dict[str, Any] = {
         "timestamp": _utc_ts(),
         "dry_run": bool(dry_run),
         "strict": bool(strict),
+        "stop_on_error": bool(stop_on_error),
         "plan": plan,
     }
 
+    if requested_exclude:
+        base["exclude"] = requested_exclude
+    if start_at:
+        base["start_at"] = start_at
+    if stop_after:
+        base["stop_after"] = stop_after
+
     if unknown_steps:
         base["unknown_steps"] = unknown_steps
+    if selector_unknown:
+        base["unknown_selectors"] = selector_unknown
 
-    if unknown_steps and strict:
+    if strict and (unknown_steps or selector_unknown):
         return {
             **base,
             "status": "error",
-            "error": "unknown_steps",
+            "error": "unknown_steps" if unknown_steps else "unknown_selectors",
         }
 
+    # Apply exclude/start/stop (even in non-strict mode, unknowns are ignored)
+    plan2 = _apply_exclude(plan, requested_exclude)
+    plan2 = _apply_start_stop(plan2, start_at, stop_after)
+    base["plan"] = plan2
+
     if dry_run:
-        # Non-strict dry-run: just show plan (+ unknown_steps if any)
         out = {**base, "status": "ok"}
-        if unknown_steps and not strict:
-            out["warning"] = "unknown_steps_ignored"
+        if (unknown_steps or selector_unknown) and not strict:
+            out["warning"] = "unknown_values_ignored"
         return out
 
     results: List[Dict[str, Any]] = []
-    for step in plan:
-        results.append(run_step(step))
+    for step in plan2:
+        step_result = run_step(step)
+        results.append(step_result)
+
+        if stop_on_error and step_result.get("status") == "error":
+            base["stopped_early"] = True
+            base["stop_reason"] = "stop_on_error"
+            base["stop_step"] = step
+            break
 
     out2: Dict[str, Any] = {
         **base,
         "status": "ok",
         "results": results,
     }
-    if unknown_steps and not strict:
-        out2["warning"] = "unknown_steps_ignored"
+    if (unknown_steps or selector_unknown) and not strict:
+        out2["warning"] = "unknown_values_ignored"
     return out2
 
 
