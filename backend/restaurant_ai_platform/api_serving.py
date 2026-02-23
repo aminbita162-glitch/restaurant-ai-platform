@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, Optional
+import time
+import uuid
 
 
 def _utc_ts() -> str:
@@ -12,59 +14,111 @@ def _log(message: str) -> None:
     print(f"[{_utc_ts()}] {message}")
 
 
+def _response_ok(data: Dict[str, Any], status_code: int = 200) -> Any:
+    # Imported lazily so this module can still be imported without Flask
+    from flask import jsonify  # type: ignore
+
+    payload = {
+        "ok": True,
+        "timestamp": _utc_ts(),
+        **data,
+    }
+    return jsonify(payload), status_code
+
+
+def _response_error(message: str, status_code: int = 500, *, details: Optional[Dict[str, Any]] = None) -> Any:
+    from flask import jsonify  # type: ignore
+
+    payload: Dict[str, Any] = {
+        "ok": False,
+        "error": {"message": message},
+        "timestamp": _utc_ts(),
+    }
+    if details:
+        payload["error"]["details"] = details
+    return jsonify(payload), status_code
+
+
 bp: Optional[Any] = None
 
 try:
-    from flask import Blueprint, jsonify, request  # type: ignore
+    from flask import Blueprint, request  # type: ignore
 
     bp = Blueprint("api_serving", __name__)
 
+    # ----------------------------
+    # Health
+    # ----------------------------
     @bp.get("/health")
+    @bp.get("/api/v1/health")
     def health() -> Any:
-        return jsonify(
+        return _response_ok(
             {
-                "status": "ok",
                 "service": "restaurant-ai-platform",
-                "timestamp": _utc_ts(),
+                "status": "ok",
             }
         )
 
+    # ----------------------------
+    # Pipeline status (docs-ish)
+    # ----------------------------
     @bp.get("/pipeline/status")
+    @bp.get("/api/v1/pipeline/status")
     def pipeline_status() -> Any:
-        return jsonify(
+        return _response_ok(
             {
-                "status": "ready",
-                "endpoints": {
-                    "health": "/health",
-                    "pipeline_run": "/pipeline/run (POST)",
-                    "pipeline_status": "/pipeline/status",
+                "service": "restaurant-ai-platform",
+                "pipeline": {
+                    "status": "ready",
+                    "endpoints": {
+                        "health": ["/health", "/api/v1/health"],
+                        "pipeline_status": ["/pipeline/status", "/api/v1/pipeline/status"],
+                        "pipeline_run": ["/pipeline/run (POST)", "/api/v1/pipeline/run (POST)"],
+                    },
                 },
-                "timestamp": _utc_ts(),
             }
         )
 
+    # ----------------------------
+    # Pipeline run (POST)
+    # ----------------------------
     @bp.post("/pipeline/run")
+    @bp.post("/api/v1/pipeline/run")
     def pipeline_run() -> Any:
         from . import orchestrator  # local import to avoid circular dependency
 
-        payload = {}
+        started = time.time()
+        request_id = uuid.uuid4().hex
+
         try:
             payload = request.get_json(silent=True) or {}
-        except Exception:
-            payload = {}
+            if not isinstance(payload, dict):
+                payload = {"_raw": payload}
 
-        run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+            # For now we ignore options, but we keep them for future:
+            # e.g. {"steps": ["1_data_ingestion", ...], "dry_run": true}
+            result = orchestrator.run_pipeline()
 
-        result = orchestrator.run_pipeline()
+            duration_ms = int((time.time() - started) * 1000)
+            run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{request_id[:8]}"
 
-        return jsonify(
-            {
-                "run_id": run_id,
-                "requested_payload": payload,
-                "result": result,
-                "timestamp": _utc_ts(),
-            }
-        )
+            return _response_ok(
+                {
+                    "request_id": request_id,
+                    "run_id": run_id,
+                    "duration_ms": duration_ms,
+                    "requested_payload": payload,
+                    "result": result,
+                }
+            )
+
+        except Exception as e:
+            _log(f"pipeline_run failed: {type(e).__name__}: {e}")
+            return _response_error(
+                "Pipeline execution failed",
+                500,
+                details={"request_id": request_id, "error_type": type(e).__name__, "error": str(e)},
+            )
 
 except Exception as e:
     _log(f"Flask blueprint not available: {type(e).__name__}: {e}")
@@ -100,7 +154,14 @@ def run() -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "api_serving_status": "ok",
         "blueprint_available": bp is not None,
-        "expected_endpoints": ["/", "/health", "/pipeline/status", "/pipeline/run"],
+        "expected_endpoints": [
+            "/health",
+            "/pipeline/status",
+            "/pipeline/run (POST)",
+            "/api/v1/health",
+            "/api/v1/pipeline/status",
+            "/api/v1/pipeline/run (POST)",
+        ],
         "timestamp": _utc_ts(),
     }
 
