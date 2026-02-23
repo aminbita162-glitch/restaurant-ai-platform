@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 import time
 import uuid
 
@@ -15,7 +15,6 @@ def _log(message: str) -> None:
 
 
 def _response_ok(data: Dict[str, Any], status_code: int = 200) -> Any:
-    # Imported lazily so this module can still be imported without Flask
     from flask import jsonify  # type: ignore
 
     payload = {
@@ -68,13 +67,16 @@ def _parse_csv(value: Optional[str]) -> Optional[List[str]]:
 
 def _collect_options_from_query(args: Any) -> Dict[str, Any]:
     """
-    Supported query params:
+    Query params (some may be ignored depending on orchestrator support):
       - dry_run=1
+      - strict=0
       - steps=1_data_ingestion,2_data_warehouse
-      - exclude=7_api_serving
-      - start_at=3_feature_engineering
-      - stop_after=6_optimization
-      - stop_on_error=1
+
+    Extra params accepted but currently ignored (returned as ignored_options):
+      - exclude=...
+      - start_at=...
+      - stop_after=...
+      - stop_on_error=...
     """
     options: Dict[str, Any] = {}
 
@@ -82,10 +84,15 @@ def _collect_options_from_query(args: Any) -> Dict[str, Any]:
     if dry_run is not None:
         options["dry_run"] = dry_run
 
+    strict = _parse_bool(args.get("strict"))
+    if strict is not None:
+        options["strict"] = strict
+
     steps = _parse_csv(args.get("steps"))
     if steps is not None:
         options["steps"] = steps
 
+    # accepted-but-ignored (for now)
     exclude = _parse_csv(args.get("exclude"))
     if exclude is not None:
         options["exclude"] = exclude
@@ -107,18 +114,21 @@ def _collect_options_from_query(args: Any) -> Dict[str, Any]:
 
 def _collect_options_from_json(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Accepts JSON body keys:
+    JSON body keys (some may be ignored depending on orchestrator support):
       - dry_run: bool
+      - strict: bool
       - steps: list[str] or comma string
-      - exclude: list[str] or comma string
-      - start_at: str
-      - stop_after: str
-      - stop_on_error: bool
+
+    Extra keys accepted but currently ignored (returned as ignored_options):
+      - exclude, start_at, stop_after, stop_on_error
     """
     options: Dict[str, Any] = {}
 
     if isinstance(payload.get("dry_run"), bool):
         options["dry_run"] = payload["dry_run"]
+
+    if isinstance(payload.get("strict"), bool):
+        options["strict"] = payload["strict"]
 
     steps = payload.get("steps")
     if isinstance(steps, list) and all(isinstance(x, str) for x in steps):
@@ -128,6 +138,7 @@ def _collect_options_from_json(payload: Dict[str, Any]) -> Dict[str, Any]:
         if parsed is not None:
             options["steps"] = parsed
 
+    # accepted-but-ignored (for now)
     exclude = payload.get("exclude")
     if isinstance(exclude, list) and all(isinstance(x, str) for x in exclude):
         options["exclude"] = exclude
@@ -150,15 +161,33 @@ def _collect_options_from_json(payload: Dict[str, Any]) -> Dict[str, Any]:
     return options
 
 
-def _run_pipeline(orchestrator: Any, options: Dict[str, Any]) -> Dict[str, Any]:
+_SUPPORTED_ORCH_KEYS = {"steps", "dry_run", "strict"}
+
+
+def _split_orchestrator_options(options: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    orch: Dict[str, Any] = {}
+    ignored: Dict[str, Any] = {}
+    for k, v in options.items():
+        if k in _SUPPORTED_ORCH_KEYS:
+            orch[k] = v
+        else:
+            ignored[k] = v
+    return orch, ignored
+
+
+def _run_pipeline(orchestrator: Any, orch_options: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Calls orchestrator.run_pipeline with options if supported.
-    Falls back to no-arg call if orchestrator does not accept args.
+    Calls orchestrator.run_pipeline with keyword options (preferred).
+    Falls back safely for older signatures.
     """
     try:
-        return orchestrator.run_pipeline(options)  # type: ignore[misc]
+        return orchestrator.run_pipeline(**orch_options)  # type: ignore[misc]
     except TypeError:
-        return orchestrator.run_pipeline()  # type: ignore[misc]
+        # older signature variants:
+        try:
+            return orchestrator.run_pipeline(orch_options)  # type: ignore[misc]
+        except TypeError:
+            return orchestrator.run_pipeline()  # type: ignore[misc]
 
 
 bp: Optional[Any] = None
@@ -192,14 +221,17 @@ try:
                 "service": "restaurant-ai-platform",
                 "pipeline": {
                     "status": "ready",
-                    "supports_options": {
+                    "supported_options_now": {
                         "dry_run": True,
                         "steps": True,
-                        "exclude": True,
-                        "start_at": True,
-                        "stop_after": True,
-                        "stop_on_error": True,
+                        "strict": True,
                     },
+                    "accepted_but_ignored_for_now": [
+                        "exclude",
+                        "start_at",
+                        "stop_after",
+                        "stop_on_error",
+                    ],
                     "endpoints": {
                         "health": ["/health", "/api/v1/health"],
                         "pipeline_status": ["/pipeline/status", "/api/v1/pipeline/status"],
@@ -209,9 +241,11 @@ try:
                             "/api/v1/pipeline/run?execute=1&confirm=yes (GET)",
                         ],
                     },
-                    "query_options_example": {
+                    "examples": {
+                        "run_all": "/api/v1/pipeline/run?execute=1&confirm=yes",
                         "dry_run": "/api/v1/pipeline/run?execute=1&confirm=yes&dry_run=1",
-                        "steps_subset": "/api/v1/pipeline/run?execute=1&confirm=yes&steps=1_data_ingestion,2_data_warehouse",
+                        "subset": "/api/v1/pipeline/run?execute=1&confirm=yes&steps=1_data_ingestion,2_data_warehouse",
+                        "non_strict": "/api/v1/pipeline/run?execute=1&confirm=yes&strict=0",
                     },
                 },
             }
@@ -224,17 +258,21 @@ try:
     @bp.get("/api/v1/pipeline/run")
     def pipeline_run_browser() -> Any:
         """
-        Browsers (Safari) always send GET when opening a URL.
+        Safari opens URLs with GET.
         Default shows instructions.
-        To execute via browser, call with:
+        To execute via browser:
             ?execute=1&confirm=yes
-        Optional controls:
+
+        Supported now:
             &dry_run=1
-            &steps=1_data_ingestion,2_data_warehouse
-            &exclude=7_api_serving
-            &start_at=3_feature_engineering
-            &stop_after=6_optimization
-            &stop_on_error=1
+            &steps=...
+            &strict=0
+
+        Accepted but currently ignored (reported back as ignored_options):
+            &exclude=...
+            &start_at=...
+            &stop_after=...
+            &stop_on_error=...
         """
         execute = (request.args.get("execute") or "").strip().lower()
         confirm = (request.args.get("confirm") or "").strip().lower()
@@ -243,11 +281,12 @@ try:
             from . import orchestrator  # local import to avoid circular dependency
 
             options = _collect_options_from_query(request.args)
+            orch_options, ignored_options = _split_orchestrator_options(options)
 
             started = time.time()
             request_id = uuid.uuid4().hex
             try:
-                result = _run_pipeline(orchestrator, options)
+                result = _run_pipeline(orchestrator, orch_options)
                 duration_ms = int((time.time() - started) * 1000)
                 run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{request_id[:8]}"
 
@@ -257,6 +296,8 @@ try:
                         "run_id": run_id,
                         "duration_ms": duration_ms,
                         "requested_payload": {"_via": "browser_get", **options},
+                        "orchestrator_options_used": orch_options,
+                        "ignored_options": ignored_options,
                         "result": result,
                     }
                 )
@@ -272,8 +313,7 @@ try:
             {
                 "service": "restaurant-ai-platform",
                 "message": "Use POST to /api/v1/pipeline/run for normal clients. "
-                "For Safari browser testing, call GET with ?execute=1&confirm=yes. "
-                "You can also pass options like dry_run=1 or steps=... in the query string.",
+                "For Safari browser testing, call GET with ?execute=1&confirm=yes.",
                 "how_to_test_in_browser": {
                     "safe_check": "/api/v1/pipeline/status",
                     "execute_pipeline": "/api/v1/pipeline/run?execute=1&confirm=yes",
@@ -300,8 +340,9 @@ try:
                 payload = {"_raw": payload}
 
             options = _collect_options_from_json(payload)
+            orch_options, ignored_options = _split_orchestrator_options(options)
 
-            result = _run_pipeline(orchestrator, options)
+            result = _run_pipeline(orchestrator, orch_options)
 
             duration_ms = int((time.time() - started) * 1000)
             run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{request_id[:8]}"
@@ -313,6 +354,8 @@ try:
                     "duration_ms": duration_ms,
                     "requested_payload": payload,
                     "parsed_options": options,
+                    "orchestrator_options_used": orch_options,
+                    "ignored_options": ignored_options,
                     "result": result,
                 }
             )
