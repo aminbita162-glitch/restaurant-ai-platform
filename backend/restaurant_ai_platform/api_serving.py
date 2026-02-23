@@ -26,7 +26,12 @@ def _response_ok(data: Dict[str, Any], status_code: int = 200) -> Any:
     return jsonify(payload), status_code
 
 
-def _response_error(message: str, status_code: int = 500, *, details: Optional[Dict[str, Any]] = None) -> Any:
+def _response_error(
+    message: str,
+    status_code: int = 500,
+    *,
+    details: Optional[Dict[str, Any]] = None,
+) -> Any:
     from flask import jsonify  # type: ignore
 
     payload: Dict[str, Any] = {
@@ -73,8 +78,68 @@ try:
                     "endpoints": {
                         "health": ["/health", "/api/v1/health"],
                         "pipeline_status": ["/pipeline/status", "/api/v1/pipeline/status"],
-                        "pipeline_run": ["/pipeline/run (POST)", "/api/v1/pipeline/run (POST)"],
+                        "pipeline_run_post": ["/pipeline/run (POST)", "/api/v1/pipeline/run (POST)"],
+                        "pipeline_run_browser": [
+                            "/pipeline/run?execute=1&confirm=yes (GET)",
+                            "/api/v1/pipeline/run?execute=1&confirm=yes (GET)",
+                        ],
                     },
+                },
+            }
+        )
+
+    # ----------------------------
+    # Pipeline run (GET helper for browsers)
+    # ----------------------------
+    @bp.get("/pipeline/run")
+    @bp.get("/api/v1/pipeline/run")
+    def pipeline_run_browser() -> Any:
+        """
+        Browsers (Safari) always send GET when opening a URL.
+        This endpoint provides instructions by default.
+        To actually execute via browser, call with:
+            ?execute=1&confirm=yes
+        """
+        execute = (request.args.get("execute") or "").strip().lower()
+        confirm = (request.args.get("confirm") or "").strip().lower()
+
+        if execute in {"1", "true", "yes"} and confirm == "yes":
+            # Run the pipeline (same logic as POST)
+            from . import orchestrator  # local import to avoid circular dependency
+
+            started = time.time()
+            request_id = uuid.uuid4().hex
+            try:
+                result = orchestrator.run_pipeline()
+                duration_ms = int((time.time() - started) * 1000)
+                run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{request_id[:8]}"
+
+                return _response_ok(
+                    {
+                        "request_id": request_id,
+                        "run_id": run_id,
+                        "duration_ms": duration_ms,
+                        "requested_payload": {"_via": "browser_get"},
+                        "result": result,
+                    }
+                )
+            except Exception as e:
+                _log(f"pipeline_run_browser failed: {type(e).__name__}: {e}")
+                return _response_error(
+                    "Pipeline execution failed",
+                    500,
+                    details={"request_id": request_id, "error_type": type(e).__name__, "error": str(e)},
+                )
+
+        # Default: show instructions
+        return _response_ok(
+            {
+                "service": "restaurant-ai-platform",
+                "message": "This endpoint is POST-only for normal clients. Use POST to /api/v1/pipeline/run. "
+                "For Safari browser testing, call with ?execute=1&confirm=yes.",
+                "how_to_test_in_browser": {
+                    "safe_check": "/api/v1/pipeline/status",
+                    "execute_pipeline": "/api/v1/pipeline/run?execute=1&confirm=yes",
                 },
             }
         )
@@ -84,7 +149,7 @@ try:
     # ----------------------------
     @bp.post("/pipeline/run")
     @bp.post("/api/v1/pipeline/run")
-    def pipeline_run() -> Any:
+    def pipeline_run_post() -> Any:
         from . import orchestrator  # local import to avoid circular dependency
 
         started = time.time()
@@ -95,8 +160,6 @@ try:
             if not isinstance(payload, dict):
                 payload = {"_raw": payload}
 
-            # For now we ignore options, but we keep them for future:
-            # e.g. {"steps": ["1_data_ingestion", ...], "dry_run": true}
             result = orchestrator.run_pipeline()
 
             duration_ms = int((time.time() - started) * 1000)
@@ -113,7 +176,7 @@ try:
             )
 
         except Exception as e:
-            _log(f"pipeline_run failed: {type(e).__name__}: {e}")
+            _log(f"pipeline_run_post failed: {type(e).__name__}: {e}")
             return _response_error(
                 "Pipeline execution failed",
                 500,
@@ -158,9 +221,11 @@ def run() -> Dict[str, Any]:
             "/health",
             "/pipeline/status",
             "/pipeline/run (POST)",
+            "/pipeline/run?execute=1&confirm=yes (GET)",
             "/api/v1/health",
             "/api/v1/pipeline/status",
             "/api/v1/pipeline/run (POST)",
+            "/api/v1/pipeline/run?execute=1&confirm=yes (GET)",
         ],
         "timestamp": _utc_ts(),
     }
