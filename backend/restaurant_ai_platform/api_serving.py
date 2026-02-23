@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 def _utc_ts() -> str:
@@ -12,11 +12,10 @@ def _log(message: str) -> None:
     print(f"[{_utc_ts()}] {message}")
 
 
-# Optional Flask Blueprint support
-bp = None  # type: ignore[assignment]
+bp: Optional[Any] = None
 
 try:
-    from flask import Blueprint, jsonify  # type: ignore
+    from flask import Blueprint, jsonify, request  # type: ignore
 
     bp = Blueprint("api_serving", __name__)
 
@@ -30,12 +29,42 @@ try:
             }
         )
 
-    @bp.get("/pipeline/run")
+    @bp.get("/pipeline/status")
+    def pipeline_status() -> Any:
+        return jsonify(
+            {
+                "status": "ready",
+                "endpoints": {
+                    "health": "/health",
+                    "pipeline_run": "/pipeline/run (POST)",
+                    "pipeline_status": "/pipeline/status",
+                },
+                "timestamp": _utc_ts(),
+            }
+        )
+
+    @bp.post("/pipeline/run")
     def pipeline_run() -> Any:
         from . import orchestrator  # local import to avoid circular dependency
 
+        payload = {}
+        try:
+            payload = request.get_json(silent=True) or {}
+        except Exception:
+            payload = {}
+
+        run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+
         result = orchestrator.run_pipeline()
-        return jsonify(result)
+
+        return jsonify(
+            {
+                "run_id": run_id,
+                "requested_payload": payload,
+                "result": result,
+                "timestamp": _utc_ts(),
+            }
+        )
 
 except Exception as e:
     _log(f"Flask blueprint not available: {type(e).__name__}: {e}")
@@ -71,7 +100,7 @@ def run() -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "api_serving_status": "ok",
         "blueprint_available": bp is not None,
-        "expected_endpoints": ["/", "/health", "/pipeline/run"],
+        "expected_endpoints": ["/", "/health", "/pipeline/status", "/pipeline/run"],
         "timestamp": _utc_ts(),
     }
 
