@@ -67,16 +67,14 @@ def _parse_csv(value: Optional[str]) -> Optional[List[str]]:
 
 def _collect_options_from_query(args: Any) -> Dict[str, Any]:
     """
-    Query params (some may be ignored depending on orchestrator support):
+    Query params supported (passed to orchestrator):
       - dry_run=1
       - strict=0
       - steps=1_data_ingestion,2_data_warehouse
-
-    Extra params accepted but currently ignored (returned as ignored_options):
-      - exclude=...
-      - start_at=...
-      - stop_after=...
-      - stop_on_error=...
+      - exclude=7_api_serving
+      - start_at=3_feature_engineering
+      - stop_after=5_ml_prediction
+      - stop_on_error=1
     """
     options: Dict[str, Any] = {}
 
@@ -92,7 +90,6 @@ def _collect_options_from_query(args: Any) -> Dict[str, Any]:
     if steps is not None:
         options["steps"] = steps
 
-    # accepted-but-ignored (for now)
     exclude = _parse_csv(args.get("exclude"))
     if exclude is not None:
         options["exclude"] = exclude
@@ -114,13 +111,14 @@ def _collect_options_from_query(args: Any) -> Dict[str, Any]:
 
 def _collect_options_from_json(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    JSON body keys (some may be ignored depending on orchestrator support):
+    JSON body keys supported (passed to orchestrator):
       - dry_run: bool
       - strict: bool
       - steps: list[str] or comma string
-
-    Extra keys accepted but currently ignored (returned as ignored_options):
-      - exclude, start_at, stop_after, stop_on_error
+      - exclude: list[str] or comma string
+      - start_at: str
+      - stop_after: str
+      - stop_on_error: bool
     """
     options: Dict[str, Any] = {}
 
@@ -138,7 +136,6 @@ def _collect_options_from_json(payload: Dict[str, Any]) -> Dict[str, Any]:
         if parsed is not None:
             options["steps"] = parsed
 
-    # accepted-but-ignored (for now)
     exclude = payload.get("exclude")
     if isinstance(exclude, list) and all(isinstance(x, str) for x in exclude):
         options["exclude"] = exclude
@@ -161,32 +158,20 @@ def _collect_options_from_json(payload: Dict[str, Any]) -> Dict[str, Any]:
     return options
 
 
-_SUPPORTED_ORCH_KEYS = {"steps", "dry_run", "strict"}
-
-
-def _split_orchestrator_options(options: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    orch: Dict[str, Any] = {}
-    ignored: Dict[str, Any] = {}
-    for k, v in options.items():
-        if k in _SUPPORTED_ORCH_KEYS:
-            orch[k] = v
-        else:
-            ignored[k] = v
-    return orch, ignored
-
-
-def _run_pipeline(orchestrator: Any, orch_options: Dict[str, Any]) -> Dict[str, Any]:
+def _run_pipeline(orchestrator: Any, options: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Calls orchestrator.run_pipeline with keyword options (preferred).
-    Falls back safely for older signatures.
+    Preferred: pass dict options (new orchestrator supports this).
+    Fallbacks included for older signatures.
     """
     try:
-        return orchestrator.run_pipeline(**orch_options)  # type: ignore[misc]
+        # New orchestrator: run_pipeline(options_dict)
+        return orchestrator.run_pipeline(options)  # type: ignore[misc]
     except TypeError:
-        # older signature variants:
+        # Older orchestrator might expect kwargs
         try:
-            return orchestrator.run_pipeline(orch_options)  # type: ignore[misc]
+            return orchestrator.run_pipeline(**options)  # type: ignore[misc]
         except TypeError:
+            # Oldest: no-arg
             return orchestrator.run_pipeline()  # type: ignore[misc]
 
 
@@ -224,14 +209,12 @@ try:
                     "supported_options_now": {
                         "dry_run": True,
                         "steps": True,
+                        "exclude": True,
+                        "start_at": True,
+                        "stop_after": True,
+                        "stop_on_error": True,
                         "strict": True,
                     },
-                    "accepted_but_ignored_for_now": [
-                        "exclude",
-                        "start_at",
-                        "stop_after",
-                        "stop_on_error",
-                    ],
                     "endpoints": {
                         "health": ["/health", "/api/v1/health"],
                         "pipeline_status": ["/pipeline/status", "/api/v1/pipeline/status"],
@@ -245,6 +228,9 @@ try:
                         "run_all": "/api/v1/pipeline/run?execute=1&confirm=yes",
                         "dry_run": "/api/v1/pipeline/run?execute=1&confirm=yes&dry_run=1",
                         "subset": "/api/v1/pipeline/run?execute=1&confirm=yes&steps=1_data_ingestion,2_data_warehouse",
+                        "exclude": "/api/v1/pipeline/run?execute=1&confirm=yes&exclude=7_api_serving",
+                        "range": "/api/v1/pipeline/run?execute=1&confirm=yes&start_at=3_feature_engineering&stop_after=5_ml_prediction",
+                        "stop_on_error": "/api/v1/pipeline/run?execute=1&confirm=yes&stop_on_error=1",
                         "non_strict": "/api/v1/pipeline/run?execute=1&confirm=yes&strict=0",
                     },
                 },
@@ -263,16 +249,14 @@ try:
         To execute via browser:
             ?execute=1&confirm=yes
 
-        Supported now:
+        Supported options:
             &dry_run=1
-            &steps=...
             &strict=0
-
-        Accepted but currently ignored (reported back as ignored_options):
+            &steps=...
             &exclude=...
             &start_at=...
             &stop_after=...
-            &stop_on_error=...
+            &stop_on_error=1
         """
         execute = (request.args.get("execute") or "").strip().lower()
         confirm = (request.args.get("confirm") or "").strip().lower()
@@ -281,12 +265,11 @@ try:
             from . import orchestrator  # local import to avoid circular dependency
 
             options = _collect_options_from_query(request.args)
-            orch_options, ignored_options = _split_orchestrator_options(options)
 
             started = time.time()
             request_id = uuid.uuid4().hex
             try:
-                result = _run_pipeline(orchestrator, orch_options)
+                result = _run_pipeline(orchestrator, options)
                 duration_ms = int((time.time() - started) * 1000)
                 run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{request_id[:8]}"
 
@@ -296,8 +279,7 @@ try:
                         "run_id": run_id,
                         "duration_ms": duration_ms,
                         "requested_payload": {"_via": "browser_get", **options},
-                        "orchestrator_options_used": orch_options,
-                        "ignored_options": ignored_options,
+                        "orchestrator_options_used": options,
                         "result": result,
                     }
                 )
@@ -319,6 +301,7 @@ try:
                     "execute_pipeline": "/api/v1/pipeline/run?execute=1&confirm=yes",
                     "dry_run_example": "/api/v1/pipeline/run?execute=1&confirm=yes&dry_run=1",
                     "steps_example": "/api/v1/pipeline/run?execute=1&confirm=yes&steps=1_data_ingestion,2_data_warehouse",
+                    "range_example": "/api/v1/pipeline/run?execute=1&confirm=yes&start_at=3_feature_engineering&stop_after=5_ml_prediction",
                 },
             }
         )
@@ -340,9 +323,8 @@ try:
                 payload = {"_raw": payload}
 
             options = _collect_options_from_json(payload)
-            orch_options, ignored_options = _split_orchestrator_options(options)
 
-            result = _run_pipeline(orchestrator, orch_options)
+            result = _run_pipeline(orchestrator, options)
 
             duration_ms = int((time.time() - started) * 1000)
             run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{request_id[:8]}"
@@ -353,9 +335,7 @@ try:
                     "run_id": run_id,
                     "duration_ms": duration_ms,
                     "requested_payload": payload,
-                    "parsed_options": options,
-                    "orchestrator_options_used": orch_options,
-                    "ignored_options": ignored_options,
+                    "orchestrator_options_used": options,
                     "result": result,
                 }
             )
