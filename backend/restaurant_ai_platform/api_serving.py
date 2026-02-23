@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 import time
 import uuid
 
@@ -44,6 +44,123 @@ def _response_error(
     return jsonify(payload), status_code
 
 
+def _parse_bool(value: Optional[str]) -> Optional[bool]:
+    if value is None:
+        return None
+    v = value.strip().lower()
+    if v in {"1", "true", "yes", "y", "on"}:
+        return True
+    if v in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
+
+
+def _parse_csv(value: Optional[str]) -> Optional[List[str]]:
+    if value is None:
+        return None
+    v = value.strip()
+    if not v:
+        return None
+    parts = [p.strip() for p in v.split(",")]
+    parts = [p for p in parts if p]
+    return parts or None
+
+
+def _collect_options_from_query(args: Any) -> Dict[str, Any]:
+    """
+    Supported query params:
+      - dry_run=1
+      - steps=1_data_ingestion,2_data_warehouse
+      - exclude=7_api_serving
+      - start_at=3_feature_engineering
+      - stop_after=6_optimization
+      - stop_on_error=1
+    """
+    options: Dict[str, Any] = {}
+
+    dry_run = _parse_bool(args.get("dry_run"))
+    if dry_run is not None:
+        options["dry_run"] = dry_run
+
+    steps = _parse_csv(args.get("steps"))
+    if steps is not None:
+        options["steps"] = steps
+
+    exclude = _parse_csv(args.get("exclude"))
+    if exclude is not None:
+        options["exclude"] = exclude
+
+    start_at = (args.get("start_at") or "").strip()
+    if start_at:
+        options["start_at"] = start_at
+
+    stop_after = (args.get("stop_after") or "").strip()
+    if stop_after:
+        options["stop_after"] = stop_after
+
+    stop_on_error = _parse_bool(args.get("stop_on_error"))
+    if stop_on_error is not None:
+        options["stop_on_error"] = stop_on_error
+
+    return options
+
+
+def _collect_options_from_json(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Accepts JSON body keys:
+      - dry_run: bool
+      - steps: list[str] or comma string
+      - exclude: list[str] or comma string
+      - start_at: str
+      - stop_after: str
+      - stop_on_error: bool
+    """
+    options: Dict[str, Any] = {}
+
+    if isinstance(payload.get("dry_run"), bool):
+        options["dry_run"] = payload["dry_run"]
+
+    steps = payload.get("steps")
+    if isinstance(steps, list) and all(isinstance(x, str) for x in steps):
+        options["steps"] = steps
+    elif isinstance(steps, str):
+        parsed = _parse_csv(steps)
+        if parsed is not None:
+            options["steps"] = parsed
+
+    exclude = payload.get("exclude")
+    if isinstance(exclude, list) and all(isinstance(x, str) for x in exclude):
+        options["exclude"] = exclude
+    elif isinstance(exclude, str):
+        parsed = _parse_csv(exclude)
+        if parsed is not None:
+            options["exclude"] = parsed
+
+    start_at = payload.get("start_at")
+    if isinstance(start_at, str) and start_at.strip():
+        options["start_at"] = start_at.strip()
+
+    stop_after = payload.get("stop_after")
+    if isinstance(stop_after, str) and stop_after.strip():
+        options["stop_after"] = stop_after.strip()
+
+    if isinstance(payload.get("stop_on_error"), bool):
+        options["stop_on_error"] = payload["stop_on_error"]
+
+    return options
+
+
+def _run_pipeline(orchestrator: Any, options: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Calls orchestrator.run_pipeline with options if supported.
+    Falls back to no-arg call if orchestrator does not accept args.
+    """
+    try:
+        return orchestrator.run_pipeline(options)  # type: ignore[misc]
+    except TypeError:
+        return orchestrator.run_pipeline()  # type: ignore[misc]
+
+
 bp: Optional[Any] = None
 
 try:
@@ -75,6 +192,14 @@ try:
                 "service": "restaurant-ai-platform",
                 "pipeline": {
                     "status": "ready",
+                    "supports_options": {
+                        "dry_run": True,
+                        "steps": True,
+                        "exclude": True,
+                        "start_at": True,
+                        "stop_after": True,
+                        "stop_on_error": True,
+                    },
                     "endpoints": {
                         "health": ["/health", "/api/v1/health"],
                         "pipeline_status": ["/pipeline/status", "/api/v1/pipeline/status"],
@@ -83,6 +208,10 @@ try:
                             "/pipeline/run?execute=1&confirm=yes (GET)",
                             "/api/v1/pipeline/run?execute=1&confirm=yes (GET)",
                         ],
+                    },
+                    "query_options_example": {
+                        "dry_run": "/api/v1/pipeline/run?execute=1&confirm=yes&dry_run=1",
+                        "steps_subset": "/api/v1/pipeline/run?execute=1&confirm=yes&steps=1_data_ingestion,2_data_warehouse",
                     },
                 },
             }
@@ -96,21 +225,29 @@ try:
     def pipeline_run_browser() -> Any:
         """
         Browsers (Safari) always send GET when opening a URL.
-        This endpoint provides instructions by default.
-        To actually execute via browser, call with:
+        Default shows instructions.
+        To execute via browser, call with:
             ?execute=1&confirm=yes
+        Optional controls:
+            &dry_run=1
+            &steps=1_data_ingestion,2_data_warehouse
+            &exclude=7_api_serving
+            &start_at=3_feature_engineering
+            &stop_after=6_optimization
+            &stop_on_error=1
         """
         execute = (request.args.get("execute") or "").strip().lower()
         confirm = (request.args.get("confirm") or "").strip().lower()
 
         if execute in {"1", "true", "yes"} and confirm == "yes":
-            # Run the pipeline (same logic as POST)
             from . import orchestrator  # local import to avoid circular dependency
+
+            options = _collect_options_from_query(request.args)
 
             started = time.time()
             request_id = uuid.uuid4().hex
             try:
-                result = orchestrator.run_pipeline()
+                result = _run_pipeline(orchestrator, options)
                 duration_ms = int((time.time() - started) * 1000)
                 run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{request_id[:8]}"
 
@@ -119,7 +256,7 @@ try:
                         "request_id": request_id,
                         "run_id": run_id,
                         "duration_ms": duration_ms,
-                        "requested_payload": {"_via": "browser_get"},
+                        "requested_payload": {"_via": "browser_get", **options},
                         "result": result,
                     }
                 )
@@ -131,15 +268,17 @@ try:
                     details={"request_id": request_id, "error_type": type(e).__name__, "error": str(e)},
                 )
 
-        # Default: show instructions
         return _response_ok(
             {
                 "service": "restaurant-ai-platform",
-                "message": "This endpoint is POST-only for normal clients. Use POST to /api/v1/pipeline/run. "
-                "For Safari browser testing, call with ?execute=1&confirm=yes.",
+                "message": "Use POST to /api/v1/pipeline/run for normal clients. "
+                "For Safari browser testing, call GET with ?execute=1&confirm=yes. "
+                "You can also pass options like dry_run=1 or steps=... in the query string.",
                 "how_to_test_in_browser": {
                     "safe_check": "/api/v1/pipeline/status",
                     "execute_pipeline": "/api/v1/pipeline/run?execute=1&confirm=yes",
+                    "dry_run_example": "/api/v1/pipeline/run?execute=1&confirm=yes&dry_run=1",
+                    "steps_example": "/api/v1/pipeline/run?execute=1&confirm=yes&steps=1_data_ingestion,2_data_warehouse",
                 },
             }
         )
@@ -160,7 +299,9 @@ try:
             if not isinstance(payload, dict):
                 payload = {"_raw": payload}
 
-            result = orchestrator.run_pipeline()
+            options = _collect_options_from_json(payload)
+
+            result = _run_pipeline(orchestrator, options)
 
             duration_ms = int((time.time() - started) * 1000)
             run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{request_id[:8]}"
@@ -171,6 +312,7 @@ try:
                     "run_id": run_id,
                     "duration_ms": duration_ms,
                     "requested_payload": payload,
+                    "parsed_options": options,
                     "result": result,
                 }
             )
