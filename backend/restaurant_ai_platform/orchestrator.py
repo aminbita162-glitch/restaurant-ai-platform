@@ -21,6 +21,7 @@ def _utc_ts() -> str:
 
 
 def _log(message: str) -> None:
+    # Simple stdout logging (Render will capture it)
     print(f"[{_utc_ts()}] {message}")
 
 
@@ -32,7 +33,7 @@ def _normalize_steps(value: Any) -> Optional[List[str]]:
       - comma-separated string
     Returns:
       - None (meaning: use default PIPELINE_ORDER)
-      - list of step names
+      - list of step names (cleaned)
     """
     if value is None:
         return None
@@ -234,78 +235,92 @@ def run_pipeline(
 
     plan, unknown_steps = _select_plan(requested_steps)
 
-    # Validate special selectors if strict
-    selector_unknown: List[str] = []
+    # Validate selectors/exclude values (only matters if strict=True)
+    unknown_selectors: List[str] = []
     if start_at and start_at not in PIPELINE_ORDER:
-        selector_unknown.append(start_at)
+        unknown_selectors.append(start_at)
     if stop_after and stop_after not in PIPELINE_ORDER:
-        selector_unknown.append(stop_after)
+        unknown_selectors.append(stop_after)
     if requested_exclude:
         for ex in requested_exclude:
             if ex not in PIPELINE_ORDER:
-                selector_unknown.append(ex)
+                unknown_selectors.append(ex)
 
-    # Deduplicate selector_unknown
+    # Deduplicate unknown_selectors preserving order
     sel_seen: set[str] = set()
-    selector_unknown = [s for s in selector_unknown if not (s in sel_seen or sel_seen.add(s))]
+    dedup_unknown_selectors: List[str] = []
+    for s in unknown_selectors:
+        if s not in sel_seen:
+            dedup_unknown_selectors.append(s)
+            sel_seen.add(s)
+    unknown_selectors = dedup_unknown_selectors
+
+    options_used: Dict[str, Any] = {
+        "steps": requested_steps,
+        "exclude": requested_exclude,
+        "start_at": start_at,
+        "stop_after": stop_after,
+        "dry_run": bool(dry_run),
+        "stop_on_error": bool(stop_on_error),
+        "strict": bool(strict),
+    }
 
     base: Dict[str, Any] = {
         "timestamp": _utc_ts(),
-        "dry_run": bool(dry_run),
-        "strict": bool(strict),
-        "stop_on_error": bool(stop_on_error),
+        "status": "ok",  # overall request status (not per-step)
+        "options_used": options_used,
         "plan": plan,
     }
 
-    if requested_exclude:
-        base["exclude"] = requested_exclude
-    if start_at:
-        base["start_at"] = start_at
-    if stop_after:
-        base["stop_after"] = stop_after
-
     if unknown_steps:
         base["unknown_steps"] = unknown_steps
-    if selector_unknown:
-        base["unknown_selectors"] = selector_unknown
+    if unknown_selectors:
+        base["unknown_selectors"] = unknown_selectors
 
-    if strict and (unknown_steps or selector_unknown):
-        return {
-            **base,
-            "status": "error",
-            "error": "unknown_steps" if unknown_steps else "unknown_selectors",
-        }
+    # strict mode: fail fast on any unknowns
+    if strict and (unknown_steps or unknown_selectors):
+        base["status"] = "error"
+        base["error"] = "unknown_steps" if unknown_steps else "unknown_selectors"
+        return base
 
-    # Apply exclude/start/stop (even in non-strict mode, unknowns are ignored)
+    # Apply exclude/start/stop (unknowns are ignored in non-strict mode)
     plan2 = _apply_exclude(plan, requested_exclude)
     plan2 = _apply_start_stop(plan2, start_at, stop_after)
     base["plan"] = plan2
 
     if dry_run:
-        out = {**base, "status": "ok"}
-        if (unknown_steps or selector_unknown) and not strict:
-            out["warning"] = "unknown_values_ignored"
-        return out
+        if (unknown_steps or unknown_selectors) and not strict:
+            base["warning"] = "unknown_values_ignored"
+        return base
 
     results: List[Dict[str, Any]] = []
+    error_count = 0
+
     for step in plan2:
         step_result = run_step(step)
         results.append(step_result)
 
-        if stop_on_error and step_result.get("status") == "error":
-            base["stopped_early"] = True
-            base["stop_reason"] = "stop_on_error"
-            base["stop_step"] = step
-            break
+        if step_result.get("status") == "error":
+            error_count += 1
+            if stop_on_error:
+                base["stopped_early"] = True
+                base["stop_reason"] = "stop_on_error"
+                base["stop_step"] = step
+                break
 
-    out2: Dict[str, Any] = {
-        **base,
-        "status": "ok",
-        "results": results,
+    # Summary for standardized output (does not break existing callers)
+    base["results"] = results
+    base["summary"] = {
+        "steps_planned": len(plan2),
+        "steps_returned": len(results),
+        "error_count": error_count,
+        "has_errors": error_count > 0,
     }
-    if (unknown_steps or selector_unknown) and not strict:
-        out2["warning"] = "unknown_values_ignored"
-    return out2
+
+    if (unknown_steps or unknown_selectors) and not strict:
+        base["warning"] = "unknown_values_ignored"
+
+    return base
 
 
 def _run_data_ingestion() -> Dict[str, Any]:
