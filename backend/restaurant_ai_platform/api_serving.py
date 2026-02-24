@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, Optional, List
+import os
 import time
 import uuid
+import json
+import sqlite3
 
 
 def _utc_ts() -> str:
@@ -173,18 +176,97 @@ def _run_pipeline(orchestrator: Any, options: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ----------------------------
-# In-memory "last run" store
-# NOTE: On Render this is per-instance and resets on deploy/restart.
+# Persistence (SQLite)
+#   - stores last run(s) on disk
+#   - path is configurable via env PIPELINE_DB_PATH
 # ----------------------------
-_LAST_RUN: Optional[Dict[str, Any]] = None
+_DB_PATH_DEFAULT = "/tmp/restaurant_ai_pipeline.db"
+_DB_PATH = os.getenv("PIPELINE_DB_PATH", _DB_PATH_DEFAULT)
 
 
-def _set_last_run(payload: Dict[str, Any]) -> None:
-    global _LAST_RUN
-    _LAST_RUN = {
-        **payload,
-        "stored_at": _utc_ts(),
-    }
+def _get_connection() -> sqlite3.Connection:
+    # check_same_thread=False because WSGI servers can use threads
+    conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_db() -> None:
+    try:
+        conn = _get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pipeline_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT,
+                request_id TEXT,
+                status TEXT,
+                duration_ms INTEGER,
+                stored_at TEXT,
+                payload_json TEXT
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        _log(f"persistence_init_failed: {type(e).__name__}: {e}")
+
+
+def _save_run(payload: Dict[str, Any], *, status: str) -> None:
+    try:
+        _init_db()
+        conn = _get_connection()
+        cursor = conn.cursor()
+
+        run_id = str(payload.get("run_id") or "")
+        request_id = str(payload.get("request_id") or "")
+        duration_ms_val = payload.get("duration_ms")
+        duration_ms = int(duration_ms_val) if isinstance(duration_ms_val, (int, float)) else 0
+
+        cursor.execute(
+            """
+            INSERT INTO pipeline_runs (run_id, request_id, status, duration_ms, stored_at, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (run_id, request_id, status, duration_ms, _utc_ts(), json.dumps(payload, ensure_ascii=False)),
+        )
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        _log(f"persistence_save_failed: {type(e).__name__}: {e}")
+
+
+def _get_last_run() -> Optional[Dict[str, Any]]:
+    try:
+        _init_db()
+        conn = _get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT payload_json, stored_at, status
+            FROM pipeline_runs
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            return None
+
+        payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
+        if isinstance(payload, dict):
+            payload.setdefault("stored_at", row["stored_at"])
+            payload.setdefault("stored_status", row["status"])
+            return payload
+        return {"stored_at": row["stored_at"], "stored_status": row["status"], "payload": payload}
+    except Exception as e:
+        _log(f"persistence_read_failed: {type(e).__name__}: {e}")
+        return None
 
 
 bp: Optional[Any] = None
@@ -230,7 +312,12 @@ try:
                     "endpoints": {
                         "health": ["/health", "/api/v1/health"],
                         "pipeline_status": ["/pipeline/status", "/api/v1/pipeline/status"],
-                        "pipeline_last_run": ["/pipeline/last-run", "/api/v1/pipeline/last-run"],
+                        "pipeline_last_run": [
+                            "/pipeline/last-run",
+                            "/api/v1/pipeline/last-run",
+                            "/pipeline/last_run",
+                            "/api/v1/pipeline/last_run",
+                        ],
                         "pipeline_run_post": ["/pipeline/run (POST)", "/api/v1/pipeline/run (POST)"],
                         "pipeline_run_browser": [
                             "/pipeline/run?execute=1&confirm=yes (GET)",
@@ -252,12 +339,15 @@ try:
         )
 
     # ----------------------------
-    # Pipeline last run
+    # Pipeline last run (aliases supported)
     # ----------------------------
     @bp.get("/pipeline/last-run")
     @bp.get("/api/v1/pipeline/last-run")
+    @bp.get("/pipeline/last_run")
+    @bp.get("/api/v1/pipeline/last_run")
     def pipeline_last_run() -> Any:
-        if _LAST_RUN is None:
+        last_run = _get_last_run()
+        if last_run is None:
             return _response_ok(
                 {
                     "service": "restaurant-ai-platform",
@@ -270,7 +360,7 @@ try:
             {
                 "service": "restaurant-ai-platform",
                 "has_last_run": True,
-                "last_run": _LAST_RUN,
+                "last_run": last_run,
             }
         )
 
@@ -303,8 +393,15 @@ try:
                     "orchestrator_options_used": options,
                     "result": result,
                 }
-                _set_last_run(response_payload)
 
+                stored_status = "ok"
+                try:
+                    if isinstance(result, dict) and isinstance(result.get("status"), str):
+                        stored_status = str(result["status"])
+                except Exception:
+                    stored_status = "ok"
+
+                _save_run(response_payload, status=stored_status)
                 return _response_ok(response_payload)
             except Exception as e:
                 _log(f"pipeline_run_browser failed: {type(e).__name__}: {e}")
@@ -314,7 +411,7 @@ try:
                     "error_type": type(e).__name__,
                     "error": str(e),
                 }
-                _set_last_run({"failed": True, **err_payload})
+                _save_run(err_payload, status="error")
                 return _response_error("Pipeline execution failed", 500, details=err_payload)
 
         return _response_ok(
@@ -364,8 +461,15 @@ try:
                 "orchestrator_options_used": options,
                 "result": result,
             }
-            _set_last_run(response_payload)
 
+            stored_status = "ok"
+            try:
+                if isinstance(result, dict) and isinstance(result.get("status"), str):
+                    stored_status = str(result["status"])
+            except Exception:
+                stored_status = "ok"
+
+            _save_run(response_payload, status=stored_status)
             return _response_ok(response_payload)
 
         except Exception as e:
@@ -375,7 +479,7 @@ try:
                 "error_type": type(e).__name__,
                 "error": str(e),
             }
-            _set_last_run({"failed": True, **err_payload})
+            _save_run(err_payload, status="error")
             return _response_error("Pipeline execution failed", 500, details=err_payload)
 
 except Exception as e:
@@ -409,18 +513,28 @@ def run() -> Dict[str, Any]:
     """
     _log("api_serving.run() started")
 
+    # Try init DB early so we surface issues in logs (but do not fail the step)
+    _init_db()
+
     result: Dict[str, Any] = {
         "api_serving_status": "ok",
         "blueprint_available": bp is not None,
+        "persistence": {
+            "enabled": True,
+            "db_path": _DB_PATH,
+            "note": "SQLite on Render may be ephemeral depending on instance lifecycle. For durable storage, use a managed DB.",
+        },
         "expected_endpoints": [
             "/health",
             "/pipeline/status",
             "/pipeline/last-run",
+            "/pipeline/last_run",
             "/pipeline/run (POST)",
             "/pipeline/run?execute=1&confirm=yes (GET)",
             "/api/v1/health",
             "/api/v1/pipeline/status",
             "/api/v1/pipeline/last-run",
+            "/api/v1/pipeline/last_run",
             "/api/v1/pipeline/run (POST)",
             "/api/v1/pipeline/run?execute=1&confirm=yes (GET)",
         ],
