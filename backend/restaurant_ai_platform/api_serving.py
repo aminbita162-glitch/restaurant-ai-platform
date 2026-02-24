@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List
 import time
 import uuid
 
@@ -164,15 +164,27 @@ def _run_pipeline(orchestrator: Any, options: Dict[str, Any]) -> Dict[str, Any]:
     Fallbacks included for older signatures.
     """
     try:
-        # New orchestrator: run_pipeline(options_dict)
         return orchestrator.run_pipeline(options)  # type: ignore[misc]
     except TypeError:
-        # Older orchestrator might expect kwargs
         try:
             return orchestrator.run_pipeline(**options)  # type: ignore[misc]
         except TypeError:
-            # Oldest: no-arg
             return orchestrator.run_pipeline()  # type: ignore[misc]
+
+
+# ----------------------------
+# In-memory "last run" store
+# NOTE: On Render this is per-instance and resets on deploy/restart.
+# ----------------------------
+_LAST_RUN: Optional[Dict[str, Any]] = None
+
+
+def _set_last_run(payload: Dict[str, Any]) -> None:
+    global _LAST_RUN
+    _LAST_RUN = {
+        **payload,
+        "stored_at": _utc_ts(),
+    }
 
 
 bp: Optional[Any] = None
@@ -218,6 +230,7 @@ try:
                     "endpoints": {
                         "health": ["/health", "/api/v1/health"],
                         "pipeline_status": ["/pipeline/status", "/api/v1/pipeline/status"],
+                        "pipeline_last_run": ["/pipeline/last-run", "/api/v1/pipeline/last-run"],
                         "pipeline_run_post": ["/pipeline/run (POST)", "/api/v1/pipeline/run (POST)"],
                         "pipeline_run_browser": [
                             "/pipeline/run?execute=1&confirm=yes (GET)",
@@ -227,6 +240,7 @@ try:
                     "examples": {
                         "run_all": "/api/v1/pipeline/run?execute=1&confirm=yes",
                         "dry_run": "/api/v1/pipeline/run?execute=1&confirm=yes&dry_run=1",
+                        "last_run": "/api/v1/pipeline/last-run",
                         "subset": "/api/v1/pipeline/run?execute=1&confirm=yes&steps=1_data_ingestion,2_data_warehouse",
                         "exclude": "/api/v1/pipeline/run?execute=1&confirm=yes&exclude=7_api_serving",
                         "range": "/api/v1/pipeline/run?execute=1&confirm=yes&start_at=3_feature_engineering&stop_after=5_ml_prediction",
@@ -238,26 +252,34 @@ try:
         )
 
     # ----------------------------
+    # Pipeline last run
+    # ----------------------------
+    @bp.get("/pipeline/last-run")
+    @bp.get("/api/v1/pipeline/last-run")
+    def pipeline_last_run() -> Any:
+        if _LAST_RUN is None:
+            return _response_ok(
+                {
+                    "service": "restaurant-ai-platform",
+                    "has_last_run": False,
+                    "last_run": None,
+                    "message": "No pipeline run has been stored yet. Run the pipeline first.",
+                }
+            )
+        return _response_ok(
+            {
+                "service": "restaurant-ai-platform",
+                "has_last_run": True,
+                "last_run": _LAST_RUN,
+            }
+        )
+
+    # ----------------------------
     # Pipeline run (GET helper for browsers)
     # ----------------------------
     @bp.get("/pipeline/run")
     @bp.get("/api/v1/pipeline/run")
     def pipeline_run_browser() -> Any:
-        """
-        Safari opens URLs with GET.
-        Default shows instructions.
-        To execute via browser:
-            ?execute=1&confirm=yes
-
-        Supported options:
-            &dry_run=1
-            &strict=0
-            &steps=...
-            &exclude=...
-            &start_at=...
-            &stop_after=...
-            &stop_on_error=1
-        """
         execute = (request.args.get("execute") or "").strip().lower()
         confirm = (request.args.get("confirm") or "").strip().lower()
 
@@ -273,23 +295,27 @@ try:
                 duration_ms = int((time.time() - started) * 1000)
                 run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{request_id[:8]}"
 
-                return _response_ok(
-                    {
-                        "request_id": request_id,
-                        "run_id": run_id,
-                        "duration_ms": duration_ms,
-                        "requested_payload": {"_via": "browser_get", **options},
-                        "orchestrator_options_used": options,
-                        "result": result,
-                    }
-                )
+                response_payload = {
+                    "request_id": request_id,
+                    "run_id": run_id,
+                    "duration_ms": duration_ms,
+                    "requested_payload": {"_via": "browser_get", **options},
+                    "orchestrator_options_used": options,
+                    "result": result,
+                }
+                _set_last_run(response_payload)
+
+                return _response_ok(response_payload)
             except Exception as e:
                 _log(f"pipeline_run_browser failed: {type(e).__name__}: {e}")
-                return _response_error(
-                    "Pipeline execution failed",
-                    500,
-                    details={"request_id": request_id, "error_type": type(e).__name__, "error": str(e)},
-                )
+                err_payload = {
+                    "request_id": request_id,
+                    "requested_payload": {"_via": "browser_get", **options},
+                    "error_type": type(e).__name__,
+                    "error": str(e),
+                }
+                _set_last_run({"failed": True, **err_payload})
+                return _response_error("Pipeline execution failed", 500, details=err_payload)
 
         return _response_ok(
             {
@@ -300,6 +326,7 @@ try:
                     "safe_check": "/api/v1/pipeline/status",
                     "execute_pipeline": "/api/v1/pipeline/run?execute=1&confirm=yes",
                     "dry_run_example": "/api/v1/pipeline/run?execute=1&confirm=yes&dry_run=1",
+                    "last_run": "/api/v1/pipeline/last-run",
                     "steps_example": "/api/v1/pipeline/run?execute=1&confirm=yes&steps=1_data_ingestion,2_data_warehouse",
                     "range_example": "/api/v1/pipeline/run?execute=1&confirm=yes&start_at=3_feature_engineering&stop_after=5_ml_prediction",
                 },
@@ -329,24 +356,27 @@ try:
             duration_ms = int((time.time() - started) * 1000)
             run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{request_id[:8]}"
 
-            return _response_ok(
-                {
-                    "request_id": request_id,
-                    "run_id": run_id,
-                    "duration_ms": duration_ms,
-                    "requested_payload": payload,
-                    "orchestrator_options_used": options,
-                    "result": result,
-                }
-            )
+            response_payload = {
+                "request_id": request_id,
+                "run_id": run_id,
+                "duration_ms": duration_ms,
+                "requested_payload": payload,
+                "orchestrator_options_used": options,
+                "result": result,
+            }
+            _set_last_run(response_payload)
+
+            return _response_ok(response_payload)
 
         except Exception as e:
             _log(f"pipeline_run_post failed: {type(e).__name__}: {e}")
-            return _response_error(
-                "Pipeline execution failed",
-                500,
-                details={"request_id": request_id, "error_type": type(e).__name__, "error": str(e)},
-            )
+            err_payload = {
+                "request_id": request_id,
+                "error_type": type(e).__name__,
+                "error": str(e),
+            }
+            _set_last_run({"failed": True, **err_payload})
+            return _response_error("Pipeline execution failed", 500, details=err_payload)
 
 except Exception as e:
     _log(f"Flask blueprint not available: {type(e).__name__}: {e}")
@@ -385,10 +415,12 @@ def run() -> Dict[str, Any]:
         "expected_endpoints": [
             "/health",
             "/pipeline/status",
+            "/pipeline/last-run",
             "/pipeline/run (POST)",
             "/pipeline/run?execute=1&confirm=yes (GET)",
             "/api/v1/health",
             "/api/v1/pipeline/status",
+            "/api/v1/pipeline/last-run",
             "/api/v1/pipeline/run (POST)",
             "/api/v1/pipeline/run?execute=1&confirm=yes (GET)",
         ],
