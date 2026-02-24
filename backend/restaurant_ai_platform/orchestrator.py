@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import time
+import uuid
 
 
 PIPELINE_ORDER: List[str] = [
@@ -22,19 +23,22 @@ def _utc_ts() -> str:
 
 
 def _log(message: str) -> None:
+    # keep simple (Render logs friendly)
     print(f"[{_utc_ts()}] {message}")
 
 
+def _log_event(event: str, *, run_id: str, step: Optional[str] = None, extra: Optional[Dict[str, Any]] = None) -> None:
+    # one-line structured-ish log without json dependency
+    parts = [f"event={event}", f"run_id={run_id}"]
+    if step:
+        parts.append(f"step={step}")
+    if extra:
+        for k, v in extra.items():
+            parts.append(f"{k}={v}")
+    _log(" ".join(parts))
+
+
 def _normalize_steps(value: Any) -> Optional[List[str]]:
-    """
-    Accepts:
-      - None
-      - list/tuple/set of strings
-      - comma-separated string
-    Returns:
-      - None (meaning: use default PIPELINE_ORDER)
-      - list of step names
-    """
     if value is None:
         return None
 
@@ -56,12 +60,20 @@ def _normalize_steps(value: Any) -> Optional[List[str]]:
     return [s] if s else None
 
 
+def _normalize_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    s = str(value).strip().lower()
+    if s in {"1", "true", "yes", "y", "on"}:
+        return True
+    if s in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
 def _select_plan(requested_steps: Optional[List[str]]) -> Tuple[List[str], List[str]]:
-    """
-    Returns (plan, unknown_steps)
-    - plan is filtered to valid steps
-    - unknown_steps contains anything not in PIPELINE_ORDER
-    """
     if requested_steps is None:
         return list(PIPELINE_ORDER), []
 
@@ -75,7 +87,7 @@ def _select_plan(requested_steps: Optional[List[str]]) -> Tuple[List[str], List[
         else:
             unknown.append(s)
 
-    # remove duplicates while keeping order
+    # dedupe keep order
     seen: set[str] = set()
     unique_plan: List[str] = []
     for s in plan:
@@ -94,21 +106,13 @@ def _select_plan(requested_steps: Optional[List[str]]) -> Tuple[List[str], List[
 
 
 def _apply_start_stop(plan: List[str], start_at: Optional[str], stop_after: Optional[str]) -> List[str]:
-    """
-    Applies start_at and stop_after on a plan.
-    - start_at: trims everything before it (inclusive start)
-    - stop_after: trims everything after it (inclusive end)
-    If step not found, returns plan unchanged (validation is handled elsewhere if strict).
-    """
     out = list(plan)
 
-    if start_at:
-        if start_at in out:
-            out = out[out.index(start_at) :]
+    if start_at and start_at in out:
+        out = out[out.index(start_at):]
 
-    if stop_after:
-        if stop_after in out:
-            out = out[: out.index(stop_after) + 1]
+    if stop_after and stop_after in out:
+        out = out[: out.index(stop_after) + 1]
 
     return out
 
@@ -120,86 +124,55 @@ def _apply_exclude(plan: List[str], exclude: Optional[List[str]]) -> List[str]:
     return [s for s in plan if s not in ex]
 
 
-def _normalize_bool(value: Any, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
+def _as_list(value: Any) -> List[Any]:
     if value is None:
-        return default
-    s = str(value).strip().lower()
-    if s in {"1", "true", "yes", "y", "on"}:
-        return True
-    if s in {"0", "false", "no", "n", "off"}:
-        return False
-    return default
-
-
-def _as_dict(value: Any) -> Dict[str, Any]:
-    if isinstance(value, dict):
+        return []
+    if isinstance(value, list):
         return value
-    return {"value": value}
+    return [value]
 
 
-def _standardize_handler_output(raw: Any) -> Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
+def _ensure_step_shape(step_name: str, status: str, started_at: str, ended_at: str, duration_ms: int,
+                       data: Any = None, errors: Optional[List[Any]] = None, warnings: Optional[List[Any]] = None,
+                       metrics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    return {
+        "step": step_name,
+        "status": status,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "duration_ms": duration_ms,
+        "errors": errors or [],
+        "warnings": warnings or [],
+        "metrics": metrics or {},
+        "data": data if data is not None else {},
+        "timestamp": _utc_ts(),
+    }
+
+
+def _coerce_step_output(step_name: str, raw: Any) -> Tuple[Any, List[Any], List[Any], Dict[str, Any]]:
     """
-    Converts ANY step handler output into:
-      - metrics: dict
-      - data: dict
-      - warnings: list[dict]
-      - errors: list[dict]
-
-    If handler already returns these keys, we reuse them.
-    Otherwise, we put the handler output into `data`.
+    Accepts any run() output and converts it to:
+      data, errors[], warnings[], metrics{}
+    If run() already returns a dict with keys like data/errors/warnings/metrics, we respect them.
+    Otherwise we put the whole output inside data.
     """
-    metrics: Dict[str, Any] = {}
-    data: Dict[str, Any] = {}
-    warnings: List[Dict[str, Any]] = []
-    errors: List[Dict[str, Any]] = []
-
     if isinstance(raw, dict):
-        # If step already uses our schema-ish keys, respect them
-        if isinstance(raw.get("metrics"), dict):
-            metrics = dict(raw.get("metrics") or {})
-        if isinstance(raw.get("data"), dict):
-            data = dict(raw.get("data") or {})
-        else:
-            # fallback: treat raw as data (minus schema keys if present)
-            data = dict(raw)
+        data = raw.get("data")
+        if data is None:
+            # If developer steps return legacy dict, keep it as data
+            data = {k: v for k, v in raw.items() if k not in {"errors", "warnings", "metrics", "status", "step"}}
 
-        if isinstance(raw.get("warnings"), list):
-            warnings = [ _as_dict(x) for x in (raw.get("warnings") or []) ]
-        if isinstance(raw.get("errors"), list):
-            errors = [ _as_dict(x) for x in (raw.get("errors") or []) ]
+        errors = _as_list(raw.get("errors"))
+        warnings = _as_list(raw.get("warnings"))
+        metrics = raw.get("metrics") if isinstance(raw.get("metrics"), dict) else {}
+        return data, errors, warnings, metrics
 
-        # If caller gave top-level "result" (older style), merge into data
-        if "result" in raw and isinstance(raw["result"], dict):
-            # keep both but prefer explicit `data` if exists
-            if not raw.get("data"):
-                data = dict(raw["result"])
-    else:
-        data = _as_dict(raw)
-
-    return metrics, data, warnings, errors
+    # non-dict output
+    return {"value": raw}, [], [], {}
 
 
-def run_step(step_name: str) -> Dict[str, Any]:
-    """
-    Executes one pipeline step and returns a STANDARD payload:
-      {
-        "step": "...",
-        "status": "ok|error|skipped",
-        "started_at": "...",
-        "ended_at": "...",
-        "duration_ms": 12,
-        "timestamp": "...",
-        "metrics": {},
-        "data": {},
-        "warnings": [],
-        "errors": []
-      }
-    """
-    started_at = _utc_ts()
-    t0 = time.time()
-    _log(f"START {step_name}")
+def run_step(step_name: str, *, run_id: str) -> Dict[str, Any]:
+    _log_event("step_start", run_id=run_id, step=step_name)
 
     registry: Dict[str, Callable[[], Dict[str, Any]]] = {
         "1_data_ingestion": _run_data_ingestion,
@@ -212,98 +185,68 @@ def run_step(step_name: str) -> Dict[str, Any]:
         "8_dashboard_update": _run_dashboard_update,
     }
 
+    started_at = _utc_ts()
+    t0 = time.time()
+
     fn = registry.get(step_name)
     if fn is None:
-        _log(f"SKIP  {step_name} (no handler registered)")
         ended_at = _utc_ts()
-        return {
-            "step": step_name,
-            "status": "skipped",
-            "reason": "no_handler",
-            "started_at": started_at,
-            "ended_at": ended_at,
-            "duration_ms": int((time.time() - t0) * 1000),
-            "timestamp": ended_at,
-            "metrics": {},
-            "data": {},
-            "warnings": [{"code": "no_handler", "message": "No handler registered for this step."}],
-            "errors": [],
-        }
+        duration_ms = int((time.time() - t0) * 1000)
+        _log_event("step_skip", run_id=run_id, step=step_name, extra={"reason": "no_handler"})
+        return _ensure_step_shape(
+            step_name,
+            "skipped",
+            started_at,
+            ended_at,
+            duration_ms,
+            data={},
+            errors=[],
+            warnings=[{"message": "no handler registered"}],
+            metrics={},
+        )
 
     try:
         raw = fn()
-        _log(f"DONE  {step_name}")
         ended_at = _utc_ts()
-        metrics, data, warnings, errors = _standardize_handler_output(raw)
+        duration_ms = int((time.time() - t0) * 1000)
 
-        return {
-            "step": step_name,
-            "status": "ok" if not errors else "error",
-            "started_at": started_at,
-            "ended_at": ended_at,
-            "duration_ms": int((time.time() - t0) * 1000),
-            "timestamp": ended_at,
-            "metrics": metrics,
-            "data": data,
-            "warnings": warnings,
-            "errors": errors,
-        }
+        data, errors, warnings, metrics = _coerce_step_output(step_name, raw)
+        status = "ok" if not errors else "ok"  # errors should be explicit failures via exception normally
+
+        _log_event("step_done", run_id=run_id, step=step_name, extra={"duration_ms": duration_ms})
+        return _ensure_step_shape(step_name, status, started_at, ended_at, duration_ms, data, errors, warnings, metrics)
 
     except ImportError as e:
-        _log(f"SKIP  {step_name} (import error: {e})")
         ended_at = _utc_ts()
-        return {
-            "step": step_name,
-            "status": "skipped",
-            "reason": "import_error",
-            "started_at": started_at,
-            "ended_at": ended_at,
-            "duration_ms": int((time.time() - t0) * 1000),
-            "timestamp": ended_at,
-            "metrics": {},
-            "data": {},
-            "warnings": [{"code": "import_error", "message": str(e)}],
-            "errors": [],
-        }
+        duration_ms = int((time.time() - t0) * 1000)
+        _log_event("step_skip", run_id=run_id, step=step_name, extra={"reason": "import_error"})
+        return _ensure_step_shape(
+            step_name,
+            "skipped",
+            started_at,
+            ended_at,
+            duration_ms,
+            data={},
+            errors=[],
+            warnings=[{"message": str(e), "type": "ImportError"}],
+            metrics={},
+        )
 
     except Exception as e:
-        _log(f"ERROR {step_name} ({type(e).__name__}: {e})")
         ended_at = _utc_ts()
-        return {
-            "step": step_name,
-            "status": "error",
-            "started_at": started_at,
-            "ended_at": ended_at,
-            "duration_ms": int((time.time() - t0) * 1000),
-            "timestamp": ended_at,
-            "metrics": {},
-            "data": {},
-            "warnings": [],
-            "errors": [{"type": type(e).__name__, "message": str(e)}],
-        }
-
-
-def _build_summary(results: List[Dict[str, Any]], steps_planned: int) -> Dict[str, Any]:
-    error_count = 0
-    skipped_count = 0
-    ok_count = 0
-    for r in results:
-        st = (r.get("status") or "").strip().lower()
-        if st == "error":
-            error_count += 1
-        elif st == "skipped":
-            skipped_count += 1
-        elif st == "ok":
-            ok_count += 1
-
-    return {
-        "steps_planned": steps_planned,
-        "steps_returned": len(results),
-        "ok_count": ok_count,
-        "skipped_count": skipped_count,
-        "error_count": error_count,
-        "has_errors": error_count > 0,
-    }
+        duration_ms = int((time.time() - t0) * 1000)
+        _log_event("step_error", run_id=run_id, step=step_name, extra={"error_type": type(e).__name__})
+        return _ensure_step_shape(
+            step_name,
+            "error",
+            started_at,
+            ended_at,
+            duration_ms,
+            data={},
+            errors=[{"type": type(e).__name__, "message": str(e)}],
+            warnings=[],
+            metrics={},
+        )
 
 
 def run_pipeline(
@@ -318,19 +261,16 @@ def run_pipeline(
     strict: bool = True,
 ) -> Dict[str, Any]:
     """
-    Supports BOTH:
+    Supports:
       - run_pipeline({"steps":[...], "dry_run": True, ...})
       - run_pipeline(steps=[...], dry_run=True, ...)
 
-    options keys (optional):
-      - steps: list[str] or "a,b,c"
-      - exclude: list[str] or "a,b"
-      - start_at: str
-      - stop_after: str
-      - dry_run: bool
-      - stop_on_error: bool
-      - strict: bool
+    Keys:
+      - steps, exclude, start_at, stop_after, dry_run, stop_on_error, strict
     """
+    # build run_id once
+    run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
     # Merge dict options if provided
     if isinstance(options, dict):
         if steps is None and "steps" in options:
@@ -361,12 +301,14 @@ def run_pipeline(
             if ex not in PIPELINE_ORDER:
                 selector_unknown.append(ex)
 
-    # Deduplicate selector_unknown
+    # dedupe selector_unknown
     sel_seen: set[str] = set()
     selector_unknown = [s for s in selector_unknown if not (s in sel_seen or sel_seen.add(s))]
 
     base: Dict[str, Any] = {
         "timestamp": _utc_ts(),
+        "run_id": run_id,
+        "status": "ok",
         "dry_run": bool(dry_run),
         "strict": bool(strict),
         "stop_on_error": bool(stop_on_error),
@@ -379,51 +321,79 @@ def run_pipeline(
         base["start_at"] = start_at
     if stop_after:
         base["stop_after"] = stop_after
-
     if unknown_steps:
         base["unknown_steps"] = unknown_steps
     if selector_unknown:
         base["unknown_selectors"] = selector_unknown
 
     if strict and (unknown_steps or selector_unknown):
-        return {
-            **base,
-            "status": "error",
-            "error": "unknown_steps" if unknown_steps else "unknown_selectors",
+        base["status"] = "error"
+        base["error"] = "unknown_steps" if unknown_steps else "unknown_selectors"
+        base["summary"] = {
+            "error_count": 1,
+            "has_errors": True,
+            "ok_count": 0,
+            "skipped_count": 0,
+            "steps_planned": len(plan),
+            "steps_returned": 0,
         }
+        _log_event("pipeline_error_validation", run_id=run_id)
+        return base
 
     # Apply exclude/start/stop
     plan2 = _apply_exclude(plan, requested_exclude)
     plan2 = _apply_start_stop(plan2, start_at, stop_after)
     base["plan"] = plan2
 
+    # dry-run just returns plan+summary
     if dry_run:
-        out = {**base, "status": "ok"}
+        base["summary"] = {
+            "error_count": 0,
+            "has_errors": False,
+            "ok_count": 0,
+            "skipped_count": 0,
+            "steps_planned": len(plan2),
+            "steps_returned": 0,
+        }
         if (unknown_steps or selector_unknown) and not strict:
-            out["warning"] = "unknown_values_ignored"
-        out["summary"] = _build_summary([], steps_planned=len(plan2))
-        return out
+            base["warning"] = "unknown_values_ignored"
+        _log_event("pipeline_dry_run", run_id=run_id, extra={"steps_planned": len(plan2)})
+        return base
+
+    _log_event("pipeline_start", run_id=run_id, extra={"steps_planned": len(plan2)})
 
     results: List[Dict[str, Any]] = []
     for step in plan2:
-        step_result = run_step(step)
-        results.append(step_result)
+        r = run_step(step, run_id=run_id)
+        results.append(r)
 
-        if stop_on_error and step_result.get("status") == "error":
+        if stop_on_error and r.get("status") == "error":
             base["stopped_early"] = True
             base["stop_reason"] = "stop_on_error"
             base["stop_step"] = step
             break
 
-    out2: Dict[str, Any] = {
-        **base,
-        "status": "ok",
-        "results": results,
-        "summary": _build_summary(results, steps_planned=len(plan2)),
+    # summary
+    ok_count = sum(1 for r in results if r.get("status") == "ok")
+    error_count = sum(1 for r in results if r.get("status") == "error")
+    skipped_count = sum(1 for r in results if r.get("status") == "skipped")
+    has_errors = error_count > 0
+
+    base["results"] = results
+    base["summary"] = {
+        "error_count": error_count,
+        "has_errors": has_errors,
+        "ok_count": ok_count,
+        "skipped_count": skipped_count,
+        "steps_planned": len(plan2),
+        "steps_returned": len(results),
     }
+
     if (unknown_steps or selector_unknown) and not strict:
-        out2["warning"] = "unknown_values_ignored"
-    return out2
+        base["warning"] = "unknown_values_ignored"
+
+    _log_event("pipeline_done", run_id=run_id, extra={"ok": ok_count, "errors": error_count, "skipped": skipped_count})
+    return base
 
 
 def _run_data_ingestion() -> Dict[str, Any]:
