@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import time
 import uuid
+import threading
 
 
 PIPELINE_ORDER: List[str] = [
@@ -18,21 +19,35 @@ PIPELINE_ORDER: List[str] = [
 ]
 
 
+# ----------------------------
+# Last-run storage (in-memory)
+# ----------------------------
+_LAST_RUN_LOCK = threading.Lock()
+_LAST_RUN: Optional[Dict[str, Any]] = None
+
+
+def set_last_run(payload: Dict[str, Any]) -> None:
+    global _LAST_RUN
+    with _LAST_RUN_LOCK:
+        _LAST_RUN = payload
+
+
+def get_last_run() -> Optional[Dict[str, Any]]:
+    with _LAST_RUN_LOCK:
+        return _LAST_RUN
+
+
 def _utc_ts() -> str:
     return datetime.utcnow().isoformat()
 
 
 def _log(message: str) -> None:
+    # keep simple (Render logs friendly)
     print(f"[{_utc_ts()}] {message}")
 
 
-def _log_event(
-    event: str,
-    *,
-    run_id: str,
-    step: Optional[str] = None,
-    extra: Optional[Dict[str, Any]] = None,
-) -> None:
+def _log_event(event: str, *, run_id: str, step: Optional[str] = None, extra: Optional[Dict[str, Any]] = None) -> None:
+    # one-line structured-ish log without json dependency
     parts = [f"event={event}", f"run_id={run_id}"]
     if step:
         parts.append(f"step={step}")
@@ -91,6 +106,7 @@ def _select_plan(requested_steps: Optional[List[str]]) -> Tuple[List[str], List[
         else:
             unknown.append(s)
 
+    # dedupe keep order
     seen: set[str] = set()
     unique_plan: List[str] = []
     for s in plan:
@@ -161,9 +177,16 @@ def _ensure_step_shape(
 
 
 def _coerce_step_output(step_name: str, raw: Any) -> Tuple[Any, List[Any], List[Any], Dict[str, Any]]:
+    """
+    Accepts any run() output and converts it to:
+      data, errors[], warnings[], metrics{}
+    If run() already returns a dict with keys like data/errors/warnings/metrics, we respect them.
+    Otherwise we put the whole output inside data.
+    """
     if isinstance(raw, dict):
         data = raw.get("data")
         if data is None:
+            # If developer steps return legacy dict, keep it as data
             data = {k: v for k, v in raw.items() if k not in {"errors", "warnings", "metrics", "status", "step"}}
 
         errors = _as_list(raw.get("errors"))
@@ -171,6 +194,7 @@ def _coerce_step_output(step_name: str, raw: Any) -> Tuple[Any, List[Any], List[
         metrics = raw.get("metrics") if isinstance(raw.get("metrics"), dict) else {}
         return data, errors, warnings, metrics
 
+    # non-dict output
     return {"value": raw}, [], [], {}
 
 
@@ -189,12 +213,12 @@ def run_step(step_name: str, *, run_id: str) -> Dict[str, Any]:
     }
 
     started_at = _utc_ts()
-    t0 = time.perf_counter()
+    t0 = time.time()
 
     fn = registry.get(step_name)
     if fn is None:
         ended_at = _utc_ts()
-        duration_ms = int((time.perf_counter() - t0) * 1000)
+        duration_ms = int((time.time() - t0) * 1000)
         _log_event("step_skip", run_id=run_id, step=step_name, extra={"reason": "no_handler"})
         return _ensure_step_shape(
             step_name,
@@ -211,7 +235,7 @@ def run_step(step_name: str, *, run_id: str) -> Dict[str, Any]:
     try:
         raw = fn()
         ended_at = _utc_ts()
-        duration_ms = int((time.perf_counter() - t0) * 1000)
+        duration_ms = int((time.time() - t0) * 1000)
 
         data, errors, warnings, metrics = _coerce_step_output(step_name, raw)
         status = "ok" if not errors else "ok"
@@ -221,7 +245,7 @@ def run_step(step_name: str, *, run_id: str) -> Dict[str, Any]:
 
     except ImportError as e:
         ended_at = _utc_ts()
-        duration_ms = int((time.perf_counter() - t0) * 1000)
+        duration_ms = int((time.time() - t0) * 1000)
         _log_event("step_skip", run_id=run_id, step=step_name, extra={"reason": "import_error"})
         return _ensure_step_shape(
             step_name,
@@ -237,7 +261,7 @@ def run_step(step_name: str, *, run_id: str) -> Dict[str, Any]:
 
     except Exception as e:
         ended_at = _utc_ts()
-        duration_ms = int((time.perf_counter() - t0) * 1000)
+        duration_ms = int((time.time() - t0) * 1000)
         _log_event("step_error", run_id=run_id, step=step_name, extra={"error_type": type(e).__name__})
         return _ensure_step_shape(
             step_name,
@@ -252,40 +276,6 @@ def run_step(step_name: str, *, run_id: str) -> Dict[str, Any]:
         )
 
 
-def _aggregate_pipeline_metrics(results: List[Dict[str, Any]]) -> Dict[str, Any]:
-    status_counts: Dict[str, int] = {}
-    total_step_duration_ms = 0
-    merged_metrics: Dict[str, Any] = {}
-
-    for r in results:
-        st = str(r.get("status") or "unknown")
-        status_counts[st] = status_counts.get(st, 0) + 1
-
-        d = r.get("duration_ms")
-        if isinstance(d, int):
-            total_step_duration_ms += d
-
-        m = r.get("metrics")
-        if isinstance(m, dict):
-            for k, v in m.items():
-                if isinstance(v, (int, float)):
-                    prev = merged_metrics.get(k)
-                    if isinstance(prev, (int, float)):
-                        merged_metrics[k] = prev + v
-                    else:
-                        merged_metrics[k] = v
-                else:
-                    if k not in merged_metrics:
-                        merged_metrics[k] = v
-
-    merged_metrics["total_step_duration_ms"] = total_step_duration_ms
-
-    return {
-        "status_counts": status_counts,
-        "metrics": merged_metrics,
-    }
-
-
 def run_pipeline(
     options: Any = None,
     *,
@@ -297,8 +287,17 @@ def run_pipeline(
     stop_on_error: bool = False,
     strict: bool = True,
 ) -> Dict[str, Any]:
+    """
+    Supports:
+      - run_pipeline({"steps":[...], "dry_run": True, ...})
+      - run_pipeline(steps=[...], dry_run=True, ...)
+
+    Keys:
+      - steps, exclude, start_at, stop_after, dry_run, stop_on_error, strict
+    """
     run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
+    # Merge dict options if provided
     if isinstance(options, dict):
         if steps is None and "steps" in options:
             steps = options.get("steps")
@@ -363,6 +362,7 @@ def run_pipeline(
             "steps_returned": 0,
         }
         _log_event("pipeline_error_validation", run_id=run_id)
+        set_last_run(base)
         return base
 
     plan2 = _apply_exclude(plan, requested_exclude)
@@ -381,10 +381,8 @@ def run_pipeline(
         if (unknown_steps or selector_unknown) and not strict:
             base["warning"] = "unknown_values_ignored"
         _log_event("pipeline_dry_run", run_id=run_id, extra={"steps_planned": len(plan2)})
+        set_last_run(base)
         return base
-
-    pipeline_started_at = _utc_ts()
-    pipeline_t0 = time.perf_counter()
 
     _log_event("pipeline_start", run_id=run_id, extra={"steps_planned": len(plan2)})
 
@@ -399,17 +397,10 @@ def run_pipeline(
             base["stop_step"] = step
             break
 
-    pipeline_ended_at = _utc_ts()
-    pipeline_duration_ms = int((time.perf_counter() - pipeline_t0) * 1000)
-
     ok_count = sum(1 for r in results if r.get("status") == "ok")
     error_count = sum(1 for r in results if r.get("status") == "error")
     skipped_count = sum(1 for r in results if r.get("status") == "skipped")
     has_errors = error_count > 0
-
-    base["started_at"] = pipeline_started_at
-    base["ended_at"] = pipeline_ended_at
-    base["duration_ms"] = pipeline_duration_ms
 
     base["results"] = results
     base["summary"] = {
@@ -421,25 +412,11 @@ def run_pipeline(
         "steps_returned": len(results),
     }
 
-    agg = _aggregate_pipeline_metrics(results)
-    base["pipeline_metrics"] = {
-        "status_counts": agg["status_counts"],
-        "metrics": agg["metrics"],
-    }
-
     if (unknown_steps or selector_unknown) and not strict:
         base["warning"] = "unknown_values_ignored"
 
-    _log_event(
-        "pipeline_done",
-        run_id=run_id,
-        extra={
-            "ok": ok_count,
-            "errors": error_count,
-            "skipped": skipped_count,
-            "duration_ms": pipeline_duration_ms,
-        },
-    )
+    _log_event("pipeline_done", run_id=run_id, extra={"ok": ok_count, "errors": error_count, "skipped": skipped_count})
+    set_last_run(base)
     return base
 
 
