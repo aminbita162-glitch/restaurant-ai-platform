@@ -22,42 +22,24 @@ def _utc_ts() -> str:
     return datetime.utcnow().isoformat()
 
 
-class _FallbackLogger:
-    def info(self, message: str, **fields: Any) -> None:
-        parts = [message] + [f"{k}={fields[k]}" for k in sorted(fields.keys())]
-        print(f"[{_utc_ts()}] " + " ".join(parts))
-
-    def warning(self, message: str, **fields: Any) -> None:
-        parts = [message] + [f"{k}={fields[k]}" for k in sorted(fields.keys())]
-        print(f"[{_utc_ts()}] " + " ".join(parts))
-
-    def error(self, message: str, **fields: Any) -> None:
-        parts = [message] + [f"{k}={fields[k]}" for k in sorted(fields.keys())]
-        print(f"[{_utc_ts()}] " + " ".join(parts))
+def _log(message: str) -> None:
+    print(f"[{_utc_ts()}] {message}")
 
 
-def _get_logger() -> Any:
-    try:
-        from .core.logger import get_logger  # type: ignore
-        return get_logger("orchestrator")
-    except Exception:
-        return _FallbackLogger()
-
-
-_LOG = _get_logger()
-
-
-def _log_event(level: str, event: str, *, run_id: str, step: Optional[str] = None, **fields: Any) -> None:
-    payload: Dict[str, Any] = {"event": event, "run_id": run_id, "timestamp": _utc_ts(), **fields}
+def _log_event(
+    event: str,
+    *,
+    run_id: str,
+    step: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    parts = [f"event={event}", f"run_id={run_id}"]
     if step:
-        payload["step"] = step
-
-    if level == "error":
-        _LOG.error("event", **payload)
-    elif level == "warning":
-        _LOG.warning("event", **payload)
-    else:
-        _LOG.info("event", **payload)
+        parts.append(f"step={step}")
+    if extra:
+        for k, v in extra.items():
+            parts.append(f"{k}={v}")
+    _log(" ".join(parts))
 
 
 def _normalize_steps(value: Any) -> Optional[List[str]]:
@@ -74,9 +56,8 @@ def _normalize_steps(value: Any) -> Optional[List[str]]:
         for item in list(value):
             if item is None:
                 continue
-            s = str(item).strip()
-            if s:
-                cleaned.append(s)
+            cleaned.append(str(item).strip())
+        cleaned = [s for s in cleaned if s]
         return cleaned or None
 
     s = str(value).strip()
@@ -194,9 +175,9 @@ def _coerce_step_output(step_name: str, raw: Any) -> Tuple[Any, List[Any], List[
 
 
 def run_step(step_name: str, *, run_id: str) -> Dict[str, Any]:
-    _log_event("info", "step_start", run_id=run_id, step=step_name)
+    _log_event("step_start", run_id=run_id, step=step_name)
 
-    registry: Dict[str, Callable[[], Any]] = {
+    registry: Dict[str, Callable[[], Dict[str, Any]]] = {
         "1_data_ingestion": _run_data_ingestion,
         "2_data_warehouse": _run_data_warehouse,
         "3_feature_engineering": _run_feature_engineering,
@@ -208,13 +189,13 @@ def run_step(step_name: str, *, run_id: str) -> Dict[str, Any]:
     }
 
     started_at = _utc_ts()
-    t0 = time.time()
+    t0 = time.perf_counter()
 
     fn = registry.get(step_name)
     if fn is None:
         ended_at = _utc_ts()
-        duration_ms = int((time.time() - t0) * 1000)
-        _log_event("warning", "step_skipped", run_id=run_id, step=step_name, reason="no_handler")
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        _log_event("step_skip", run_id=run_id, step=step_name, extra={"reason": "no_handler"})
         return _ensure_step_shape(
             step_name,
             "skipped",
@@ -230,18 +211,18 @@ def run_step(step_name: str, *, run_id: str) -> Dict[str, Any]:
     try:
         raw = fn()
         ended_at = _utc_ts()
-        duration_ms = int((time.time() - t0) * 1000)
+        duration_ms = int((time.perf_counter() - t0) * 1000)
 
         data, errors, warnings, metrics = _coerce_step_output(step_name, raw)
         status = "ok" if not errors else "ok"
 
-        _log_event("info", "step_done", run_id=run_id, step=step_name, duration_ms=duration_ms, status=status)
+        _log_event("step_done", run_id=run_id, step=step_name, extra={"duration_ms": duration_ms})
         return _ensure_step_shape(step_name, status, started_at, ended_at, duration_ms, data, errors, warnings, metrics)
 
     except ImportError as e:
         ended_at = _utc_ts()
-        duration_ms = int((time.time() - t0) * 1000)
-        _log_event("warning", "step_skipped", run_id=run_id, step=step_name, reason="import_error")
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        _log_event("step_skip", run_id=run_id, step=step_name, extra={"reason": "import_error"})
         return _ensure_step_shape(
             step_name,
             "skipped",
@@ -256,8 +237,8 @@ def run_step(step_name: str, *, run_id: str) -> Dict[str, Any]:
 
     except Exception as e:
         ended_at = _utc_ts()
-        duration_ms = int((time.time() - t0) * 1000)
-        _log_event("error", "step_error", run_id=run_id, step=step_name, error_type=type(e).__name__)
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        _log_event("step_error", run_id=run_id, step=step_name, extra={"error_type": type(e).__name__})
         return _ensure_step_shape(
             step_name,
             "error",
@@ -271,6 +252,40 @@ def run_step(step_name: str, *, run_id: str) -> Dict[str, Any]:
         )
 
 
+def _aggregate_pipeline_metrics(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    status_counts: Dict[str, int] = {}
+    total_step_duration_ms = 0
+    merged_metrics: Dict[str, Any] = {}
+
+    for r in results:
+        st = str(r.get("status") or "unknown")
+        status_counts[st] = status_counts.get(st, 0) + 1
+
+        d = r.get("duration_ms")
+        if isinstance(d, int):
+            total_step_duration_ms += d
+
+        m = r.get("metrics")
+        if isinstance(m, dict):
+            for k, v in m.items():
+                if isinstance(v, (int, float)):
+                    prev = merged_metrics.get(k)
+                    if isinstance(prev, (int, float)):
+                        merged_metrics[k] = prev + v
+                    else:
+                        merged_metrics[k] = v
+                else:
+                    if k not in merged_metrics:
+                        merged_metrics[k] = v
+
+    merged_metrics["total_step_duration_ms"] = total_step_duration_ms
+
+    return {
+        "status_counts": status_counts,
+        "metrics": merged_metrics,
+    }
+
+
 def run_pipeline(
     options: Any = None,
     *,
@@ -282,13 +297,7 @@ def run_pipeline(
     stop_on_error: bool = False,
     strict: bool = True,
 ) -> Dict[str, Any]:
-    run_id_from_options: Optional[str] = None
-    if isinstance(options, dict):
-        rid = options.get("run_id")
-        if isinstance(rid, str) and rid.strip():
-            run_id_from_options = rid.strip()
-
-    run_id = run_id_from_options or f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
     if isinstance(options, dict):
         if steps is None and "steps" in options:
@@ -353,7 +362,7 @@ def run_pipeline(
             "steps_planned": len(plan),
             "steps_returned": 0,
         }
-        _log_event("error", "pipeline_error_validation", run_id=run_id)
+        _log_event("pipeline_error_validation", run_id=run_id)
         return base
 
     plan2 = _apply_exclude(plan, requested_exclude)
@@ -371,11 +380,13 @@ def run_pipeline(
         }
         if (unknown_steps or selector_unknown) and not strict:
             base["warning"] = "unknown_values_ignored"
-        _log_event("info", "pipeline_dry_run", run_id=run_id, steps_planned=len(plan2))
+        _log_event("pipeline_dry_run", run_id=run_id, extra={"steps_planned": len(plan2)})
         return base
 
-    pipeline_t0 = time.time()
-    _log_event("info", "pipeline_start", run_id=run_id, steps_planned=len(plan2))
+    pipeline_started_at = _utc_ts()
+    pipeline_t0 = time.perf_counter()
+
+    _log_event("pipeline_start", run_id=run_id, extra={"steps_planned": len(plan2)})
 
     results: List[Dict[str, Any]] = []
     for step in plan2:
@@ -388,10 +399,17 @@ def run_pipeline(
             base["stop_step"] = step
             break
 
+    pipeline_ended_at = _utc_ts()
+    pipeline_duration_ms = int((time.perf_counter() - pipeline_t0) * 1000)
+
     ok_count = sum(1 for r in results if r.get("status") == "ok")
     error_count = sum(1 for r in results if r.get("status") == "error")
     skipped_count = sum(1 for r in results if r.get("status") == "skipped")
     has_errors = error_count > 0
+
+    base["started_at"] = pipeline_started_at
+    base["ended_at"] = pipeline_ended_at
+    base["duration_ms"] = pipeline_duration_ms
 
     base["results"] = results
     base["summary"] = {
@@ -402,59 +420,65 @@ def run_pipeline(
         "steps_planned": len(plan2),
         "steps_returned": len(results),
     }
-    base["duration_ms"] = int((time.time() - pipeline_t0) * 1000)
+
+    agg = _aggregate_pipeline_metrics(results)
+    base["pipeline_metrics"] = {
+        "status_counts": agg["status_counts"],
+        "metrics": agg["metrics"],
+    }
 
     if (unknown_steps or selector_unknown) and not strict:
         base["warning"] = "unknown_values_ignored"
 
     _log_event(
-        "info",
         "pipeline_done",
         run_id=run_id,
-        ok=ok_count,
-        errors=error_count,
-        skipped=skipped_count,
-        duration_ms=base["duration_ms"],
+        extra={
+            "ok": ok_count,
+            "errors": error_count,
+            "skipped": skipped_count,
+            "duration_ms": pipeline_duration_ms,
+        },
     )
     return base
 
 
-def _run_data_ingestion() -> Any:
+def _run_data_ingestion() -> Dict[str, Any]:
     from . import data_ingestion
     return data_ingestion.run()
 
 
-def _run_data_warehouse() -> Any:
+def _run_data_warehouse() -> Dict[str, Any]:
     from . import data_warehouse
     return data_warehouse.run()
 
 
-def _run_feature_engineering() -> Any:
+def _run_feature_engineering() -> Dict[str, Any]:
     from . import feature_engineering
     return feature_engineering.run()
 
 
-def _run_feature_store_sync() -> Any:
+def _run_feature_store_sync() -> Dict[str, Any]:
     from . import feature_store_sync
     return feature_store_sync.run()
 
 
-def _run_ml_prediction() -> Any:
+def _run_ml_prediction() -> Dict[str, Any]:
     from . import ml_prediction
     return ml_prediction.run()
 
 
-def _run_optimization() -> Any:
+def _run_optimization() -> Dict[str, Any]:
     from . import optimization
     return optimization.run()
 
 
-def _run_api_serving() -> Any:
+def _run_api_serving() -> Dict[str, Any]:
     from . import api_serving
     return api_serving.run()
 
 
-def _run_dashboard_update() -> Any:
+def _run_dashboard_update() -> Dict[str, Any]:
     from . import dashboard_update
     return dashboard_update.run()
 
