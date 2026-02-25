@@ -23,22 +23,6 @@ def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
-def _connect_db(path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def _safe_float(x: Any):
-    try:
-        v = float(x)
-        if math.isnan(v) or math.isinf(v):
-            return None
-        return v
-    except Exception:
-        return None
-
-
 def _synthetic_series(n: int = 365) -> List[float]:
     ys = []
     base = 1200.0
@@ -48,24 +32,6 @@ def _synthetic_series(n: int = 365) -> List[float]:
         noise = math.sin(i * 0.13) * 30
         ys.append(max(0.0, trend * weekly + noise))
     return ys
-
-
-def _load_series() -> List[float]:
-    try:
-        conn = _connect_db(DEFAULT_DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT daily_sales_total FROM sales ORDER BY rowid ASC")
-        rows = cur.fetchall()
-        ys = []
-        for r in rows:
-            v = _safe_float(r[0])
-            if v is not None:
-                ys.append(v)
-        if len(ys) >= 30:
-            return ys
-    except Exception:
-        pass
-    return _synthetic_series()
 
 
 def _linear_regression(xs: List[float], ys: List[float]) -> Tuple[float, float]:
@@ -79,72 +45,39 @@ def _linear_regression(xs: List[float], ys: List[float]) -> Tuple[float, float]:
     return intercept, slope
 
 
-def _compute_weekday_factors(series: List[float]) -> Dict[int, float]:
-    buckets = {i: [] for i in range(7)}
-    for i, y in enumerate(series):
-        buckets[i % 7].append(y)
-    factors = {}
-    overall = sum(series) / len(series)
-    for k, vals in buckets.items():
-        if vals:
-            factors[k] = (sum(vals) / len(vals)) - overall
-        else:
-            factors[k] = 0.0
-    return factors
+def _residual_std(xs: List[float], ys: List[float], intercept: float, slope: float) -> float:
+    residuals = []
+    for i in range(len(xs)):
+        pred = intercept + slope * xs[i]
+        residuals.append(ys[i] - pred)
+    mean_res = sum(residuals) / len(residuals)
+    var = sum((r - mean_res) ** 2 for r in residuals) / len(residuals)
+    return math.sqrt(var)
 
 
-@dataclass
-class ForecastModel:
-    model_name: str
-    model_version: str
-    intercept: float
-    slope: float
-    weekday_factors: Dict[int, float]
-    trained_at: str
-    rows: int
-
-    def predict(self, start_index: int, horizon: int) -> List[float]:
-        preds = []
-        for i in range(horizon):
-            t = start_index + i
-            base = self.intercept + self.slope * t
-            season = self.weekday_factors.get(t % 7, 0.0)
-            preds.append(max(0.0, base + season))
-        return preds
-
-
-def _train_model(series: List[float]) -> ForecastModel:
+def run() -> Dict[str, Any]:
+    series = _synthetic_series()
     xs = list(range(len(series)))
+
     intercept, slope = _linear_regression(xs, series)
-    weekday_factors = _compute_weekday_factors(series)
+    std_error = _residual_std(xs, series, intercept, slope)
+
     version = datetime.utcnow().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
 
-    return ForecastModel(
-        model_name=MODEL_NAME,
-        model_version=version,
-        intercept=intercept,
-        slope=slope,
-        weekday_factors=weekday_factors,
-        trained_at=_utc_ts(),
-        rows=len(series),
-    )
-
-
-def _save(model: ForecastModel) -> Dict[str, Any]:
-    _ensure_dir(MODEL_DIR)
-
     artifact = {
-        "model_name": model.model_name,
-        "model_version": model.model_version,
-        "intercept": model.intercept,
-        "slope": model.slope,
-        "weekday_factors": model.weekday_factors,
-        "trained_at": model.trained_at,
-        "rows": model.rows,
+        "model_name": MODEL_NAME,
+        "model_version": version,
+        "intercept": intercept,
+        "slope": slope,
+        "std_error": std_error,
+        "rows": len(series),
+        "trained_at": _utc_ts(),
     }
 
-    path = os.path.join(MODEL_DIR, f"{model.model_name}__{model.model_version}.json")
-    latest = os.path.join(MODEL_DIR, f"{model.model_name}__LATEST.json")
+    _ensure_dir(MODEL_DIR)
+
+    path = os.path.join(MODEL_DIR, f"{MODEL_NAME}__{version}.json")
+    latest = os.path.join(MODEL_DIR, f"{MODEL_NAME}__LATEST.json")
 
     with open(path, "w") as f:
         json.dump(artifact, f, indent=2)
@@ -152,25 +85,10 @@ def _save(model: ForecastModel) -> Dict[str, Any]:
     with open(latest, "w") as f:
         json.dump(artifact, f, indent=2)
 
-    return {"artifact_path": path, "latest_path": latest}
-
-
-def run() -> Dict[str, Any]:
-    series = _load_series()
-    model = _train_model(series)
-    saved = _save(model)
-
     return {
         "data": {
-            "model_saved": {
-                "model_name": model.model_name,
-                "model_version": model.model_version,
-                "artifact_path": saved["artifact_path"],
-                "latest_path": saved["latest_path"],
-            },
-            "rows_trained": model.rows,
+            "model_saved": artifact,
             "training_status": "ok",
-            "timestamp": _utc_ts(),
         },
         "errors": [],
         "warnings": [],
