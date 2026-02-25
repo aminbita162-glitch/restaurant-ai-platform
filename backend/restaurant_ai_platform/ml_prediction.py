@@ -43,16 +43,25 @@ def run() -> Dict[str, Any]:
 
     intercept = float(model["intercept"])
     slope = float(model["slope"])
-    weekday_factors = model["weekday_factors"]
+    std_error = float(model["std_error"])
     start_index = int(model["rows"])
 
     preds: List[float] = []
+    intervals: List[Dict[str, float]] = []
 
     for i in range(horizon):
         t = start_index + i
-        base = intercept + slope * t
-        season = weekday_factors.get(str(t % 7), 0.0)
-        preds.append(max(0.0, base + season))
+        prediction = intercept + slope * t
+
+        lower = max(0.0, prediction - 1.96 * std_error)
+        upper = prediction + 1.96 * std_error
+
+        preds.append(prediction)
+        intervals.append({
+            "prediction": prediction,
+            "lower_95": lower,
+            "upper_95": upper,
+        })
 
     return {
         "data": {
@@ -62,8 +71,9 @@ def run() -> Dict[str, Any]:
                 "model_version": model["model_version"],
                 "trained_at": model["trained_at"],
             },
+            "confidence_level": "95%",
             "horizon": horizon,
-            "predictions": preds,
+            "forecast": intervals,
             "timestamp": _utc_ts(),
         },
         "errors": [],
