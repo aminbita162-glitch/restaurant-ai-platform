@@ -8,6 +8,7 @@ import threading
 
 
 PIPELINE_ORDER: List[str] = [
+    "real_data_ingestion",
     "1_data_ingestion",
     "2_data_warehouse",
     "3_feature_engineering",
@@ -193,6 +194,7 @@ def run_step(step_name: str, *, run_id: str) -> Dict[str, Any]:
     _log_event("step_start", run_id=run_id, step=step_name)
 
     registry: Dict[str, Callable[[], Dict[str, Any]]] = {
+        "real_data_ingestion": _run_real_data_ingestion,
         "1_data_ingestion": _run_data_ingestion,
         "2_data_warehouse": _run_data_warehouse,
         "3_feature_engineering": _run_feature_engineering,
@@ -401,6 +403,11 @@ def run_pipeline(
     _log_event("pipeline_done", run_id=run_id, extra={"ok": ok_count, "errors": error_count, "skipped": skipped_count})
     set_last_run(base)
     return base
+
+
+def _run_real_data_ingestion() -> Dict[str, Any]:
+    from . import real_data_ingestion
+    return real_data_ingestion.run()
 
 
 def _run_data_ingestion() -> Dict[str, Any]:
