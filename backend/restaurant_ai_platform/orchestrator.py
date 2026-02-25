@@ -16,14 +16,26 @@ PIPELINE_ORDER: List[str] = [
     "6_optimization",
     "7_api_serving",
     "8_dashboard_update",
+    "9_model_training",
 ]
 
 
 # ----------------------------
-# Last-run storage (DB-first + small in-memory cache)
+# Last-run storage (in-memory)
 # ----------------------------
 _LAST_RUN_LOCK = threading.Lock()
-_LAST_RUN_CACHE: Optional[Dict[str, Any]] = None
+_LAST_RUN: Optional[Dict[str, Any]] = None
+
+
+def set_last_run(payload: Dict[str, Any]) -> None:
+    global _LAST_RUN
+    with _LAST_RUN_LOCK:
+        _LAST_RUN = payload
+
+
+def get_last_run() -> Optional[Dict[str, Any]]:
+    with _LAST_RUN_LOCK:
+        return _LAST_RUN
 
 
 def _utc_ts() -> str:
@@ -31,18 +43,10 @@ def _utc_ts() -> str:
 
 
 def _log(message: str) -> None:
-    # keep simple (Render logs friendly)
     print(f"[{_utc_ts()}] {message}")
 
 
-def _log_event(
-    event: str,
-    *,
-    run_id: str,
-    step: Optional[str] = None,
-    extra: Optional[Dict[str, Any]] = None,
-) -> None:
-    # one-line structured-ish log without json dependency
+def _log_event(event: str, *, run_id: str, step: Optional[str] = None, extra: Optional[Dict[str, Any]] = None) -> None:
     parts = [f"event={event}", f"run_id={run_id}"]
     if step:
         parts.append(f"step={step}")
@@ -50,44 +54,6 @@ def _log_event(
         for k, v in extra.items():
             parts.append(f"{k}={v}")
     _log(" ".join(parts))
-
-
-def set_last_run(payload: Dict[str, Any]) -> None:
-    """
-    DB-first persistence:
-      - Save to SQLite via core/persistence.py (if available)
-      - Also keep an in-memory cache for fast reads
-    """
-    global _LAST_RUN_CACHE
-
-    # Save to DB (best effort)
-    try:
-        from .core import persistence  # type: ignore
-        persistence.save_run(payload)
-    except Exception as e:
-        # Don't break pipeline if persistence is unavailable
-        _log(f"persistence.save_run failed: {type(e).__name__}: {e}")
-
-    # Update cache
-    with _LAST_RUN_LOCK:
-        _LAST_RUN_CACHE = payload
-
-
-def get_last_run() -> Optional[Dict[str, Any]]:
-    """
-    Read order:
-      1) in-memory cache (fast)
-      2) SQLite via core/persistence.py (best effort)
-    """
-    with _LAST_RUN_LOCK:
-        if _LAST_RUN_CACHE is not None:
-            return _LAST_RUN_CACHE
-
-    try:
-        from .core import persistence  # type: ignore
-        return persistence.get_last_run()
-    except Exception:
-        return None
 
 
 def _normalize_steps(value: Any) -> Optional[List[str]]:
@@ -210,12 +176,6 @@ def _ensure_step_shape(
 
 
 def _coerce_step_output(step_name: str, raw: Any) -> Tuple[Any, List[Any], List[Any], Dict[str, Any]]:
-    """
-    Accepts any run() output and converts it to:
-      data, errors[], warnings[], metrics{}
-    If run() already returns a dict with keys like data/errors/warnings/metrics, we respect them.
-    Otherwise we put the whole output inside data.
-    """
     if isinstance(raw, dict):
         data = raw.get("data")
         if data is None:
@@ -241,6 +201,7 @@ def run_step(step_name: str, *, run_id: str) -> Dict[str, Any]:
         "6_optimization": _run_optimization,
         "7_api_serving": _run_api_serving,
         "8_dashboard_update": _run_dashboard_update,
+        "9_model_training": _run_model_training,
     }
 
     started_at = _utc_ts()
@@ -269,8 +230,6 @@ def run_step(step_name: str, *, run_id: str) -> Dict[str, Any]:
         duration_ms = int((time.time() - t0) * 1000)
 
         data, errors, warnings, metrics = _coerce_step_output(step_name, raw)
-
-        # If errors exist, status must be "error"
         status = "ok" if not errors else "error"
 
         _log_event("step_done", run_id=run_id, step=step_name, extra={"duration_ms": duration_ms, "status": status})
@@ -320,17 +279,8 @@ def run_pipeline(
     stop_on_error: bool = False,
     strict: bool = True,
 ) -> Dict[str, Any]:
-    """
-    Supports:
-      - run_pipeline({"steps":[...], "dry_run": True, ...})
-      - run_pipeline(steps=[...], dry_run=True, ...)
-
-    Keys:
-      - steps, exclude, start_at, stop_after, dry_run, stop_on_error, strict
-    """
     run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
-    # Merge dict options if provided
     if isinstance(options, dict):
         if steps is None and "steps" in options:
             steps = options.get("steps")
@@ -445,17 +395,10 @@ def run_pipeline(
         "steps_returned": len(results),
     }
 
-    if has_errors:
-        base["status"] = "error"
-
     if (unknown_steps or selector_unknown) and not strict:
         base["warning"] = "unknown_values_ignored"
 
-    _log_event(
-        "pipeline_done",
-        run_id=run_id,
-        extra={"ok": ok_count, "errors": error_count, "skipped": skipped_count},
-    )
+    _log_event("pipeline_done", run_id=run_id, extra={"ok": ok_count, "errors": error_count, "skipped": skipped_count})
     set_last_run(base)
     return base
 
@@ -498,6 +441,11 @@ def _run_api_serving() -> Dict[str, Any]:
 def _run_dashboard_update() -> Dict[str, Any]:
     from . import dashboard_update
     return dashboard_update.run()
+
+
+def _run_model_training() -> Dict[str, Any]:
+    from . import model_training
+    return model_training.run()
 
 
 if __name__ == "__main__":
