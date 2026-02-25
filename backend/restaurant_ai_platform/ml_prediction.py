@@ -2,38 +2,26 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, List
-import json
-import os
-
-
-MODEL_DIR = os.getenv("MODEL_DIR", "/tmp/restaurant_ai_models")
-MODEL_NAME = os.getenv("MODEL_NAME", "sales_forecast_pro")
-LATEST_PATH = os.path.join(MODEL_DIR, f"{MODEL_NAME}__LATEST.json")
 
 
 def _utc_ts() -> str:
     return datetime.utcnow().isoformat()
 
 
-def _load_model() -> Dict[str, Any]:
-    if not os.path.exists(LATEST_PATH):
-        return {"error": "model_not_found"}
-    try:
-        with open(LATEST_PATH, "r") as f:
-            return json.load(f)
-    except Exception as e:
-        return {"error": f"model_load_failed:{type(e).__name__}:{e}"}
-
-
 def run() -> Dict[str, Any]:
-    model = _load_model()
+    """
+    Uses the registered demo model from model_registry.py (model.json)
+    and produces a simple 7-day forecast based on avg_daily_sales.
+    """
     horizon = 7
 
-    if "error" in model:
+    try:
+        from . import model_registry
+    except Exception as e:
         return {
             "data": {
                 "ml_prediction_status": "error",
-                "reason": model["error"],
+                "reason": f"import_model_registry_failed:{type(e).__name__}:{e}",
                 "timestamp": _utc_ts(),
             },
             "errors": [],
@@ -41,39 +29,66 @@ def run() -> Dict[str, Any]:
             "metrics": {},
         }
 
-    intercept = float(model["intercept"])
-    slope = float(model["slope"])
-    std_error = float(model["std_error"])
-    start_index = int(model["rows"])
+    try:
+        model = model_registry.load_model()
+    except FileNotFoundError:
+        return {
+            "data": {
+                "ml_prediction_status": "error",
+                "reason": "model_not_found",
+                "timestamp": _utc_ts(),
+            },
+            "errors": [],
+            "warnings": [],
+            "metrics": {},
+        }
+    except Exception as e:
+        return {
+            "data": {
+                "ml_prediction_status": "error",
+                "reason": f"model_load_failed:{type(e).__name__}:{e}",
+                "timestamp": _utc_ts(),
+            },
+            "errors": [],
+            "warnings": [],
+            "metrics": {},
+        }
 
-    preds: List[float] = []
-    intervals: List[Dict[str, float]] = []
+    try:
+        base = float(model["avg_daily_sales"])
+        model_name = str(model.get("model_name", "unknown_model"))
+        model_version = str(model.get("version", "unknown_version"))
+        trained_at = str(model.get("trained_at", "unknown_time"))
+    except Exception as e:
+        return {
+            "data": {
+                "ml_prediction_status": "error",
+                "reason": f"invalid_model_format:{type(e).__name__}:{e}",
+                "timestamp": _utc_ts(),
+            },
+            "errors": [],
+            "warnings": [],
+            "metrics": {},
+        }
 
-    for i in range(horizon):
-        t = start_index + i
-        prediction = intercept + slope * t
-
-        lower = max(0.0, prediction - 1.96 * std_error)
-        upper = prediction + 1.96 * std_error
-
-        preds.append(prediction)
-        intervals.append({
-            "prediction": prediction,
-            "lower_95": lower,
-            "upper_95": upper,
-        })
+    # Simple forecast: assume 2% daily growth (demo)
+    growth = 0.02
+    forecast: List[Dict[str, float]] = []
+    current = base
+    for _ in range(horizon):
+        current = round(current * (1.0 + growth), 2)
+        forecast.append({"predicted_sales": current})
 
     return {
         "data": {
             "ml_prediction_status": "ok",
             "model_used": {
-                "model_name": model["model_name"],
-                "model_version": model["model_version"],
-                "trained_at": model["trained_at"],
+                "model_name": model_name,
+                "model_version": model_version,
+                "trained_at": trained_at,
             },
-            "confidence_level": "95%",
             "horizon": horizon,
-            "forecast": intervals,
+            "forecast": forecast,
             "timestamp": _utc_ts(),
         },
         "errors": [],
