@@ -238,9 +238,11 @@ def run_step(step_name: str, *, run_id: str) -> Dict[str, Any]:
         duration_ms = int((time.time() - t0) * 1000)
 
         data, errors, warnings, metrics = _coerce_step_output(step_name, raw)
-        status = "ok" if not errors else "ok"
 
-        _log_event("step_done", run_id=run_id, step=step_name, extra={"duration_ms": duration_ms})
+        # ✅ FIX: if errors exist, status must be "error"
+        status = "ok" if not errors else "error"
+
+        _log_event("step_done", run_id=run_id, step=step_name, extra={"duration_ms": duration_ms, "status": status})
         return _ensure_step_shape(step_name, status, started_at, ended_at, duration_ms, data, errors, warnings, metrics)
 
     except ImportError as e:
