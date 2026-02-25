@@ -20,21 +20,10 @@ PIPELINE_ORDER: List[str] = [
 
 
 # ----------------------------
-# Last-run storage (in-memory)
+# Last-run storage (DB-first + small in-memory cache)
 # ----------------------------
 _LAST_RUN_LOCK = threading.Lock()
-_LAST_RUN: Optional[Dict[str, Any]] = None
-
-
-def set_last_run(payload: Dict[str, Any]) -> None:
-    global _LAST_RUN
-    with _LAST_RUN_LOCK:
-        _LAST_RUN = payload
-
-
-def get_last_run() -> Optional[Dict[str, Any]]:
-    with _LAST_RUN_LOCK:
-        return _LAST_RUN
+_LAST_RUN_CACHE: Optional[Dict[str, Any]] = None
 
 
 def _utc_ts() -> str:
@@ -46,7 +35,13 @@ def _log(message: str) -> None:
     print(f"[{_utc_ts()}] {message}")
 
 
-def _log_event(event: str, *, run_id: str, step: Optional[str] = None, extra: Optional[Dict[str, Any]] = None) -> None:
+def _log_event(
+    event: str,
+    *,
+    run_id: str,
+    step: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
     # one-line structured-ish log without json dependency
     parts = [f"event={event}", f"run_id={run_id}"]
     if step:
@@ -55,6 +50,44 @@ def _log_event(event: str, *, run_id: str, step: Optional[str] = None, extra: Op
         for k, v in extra.items():
             parts.append(f"{k}={v}")
     _log(" ".join(parts))
+
+
+def set_last_run(payload: Dict[str, Any]) -> None:
+    """
+    DB-first persistence:
+      - Save to SQLite via core/persistence.py (if available)
+      - Also keep an in-memory cache for fast reads
+    """
+    global _LAST_RUN_CACHE
+
+    # Save to DB (best effort)
+    try:
+        from .core import persistence  # type: ignore
+        persistence.save_run(payload)
+    except Exception as e:
+        # Don't break pipeline if persistence is unavailable
+        _log(f"persistence.save_run failed: {type(e).__name__}: {e}")
+
+    # Update cache
+    with _LAST_RUN_LOCK:
+        _LAST_RUN_CACHE = payload
+
+
+def get_last_run() -> Optional[Dict[str, Any]]:
+    """
+    Read order:
+      1) in-memory cache (fast)
+      2) SQLite via core/persistence.py (best effort)
+    """
+    with _LAST_RUN_LOCK:
+        if _LAST_RUN_CACHE is not None:
+            return _LAST_RUN_CACHE
+
+    try:
+        from .core import persistence  # type: ignore
+        return persistence.get_last_run()
+    except Exception:
+        return None
 
 
 def _normalize_steps(value: Any) -> Optional[List[str]]:
@@ -186,7 +219,6 @@ def _coerce_step_output(step_name: str, raw: Any) -> Tuple[Any, List[Any], List[
     if isinstance(raw, dict):
         data = raw.get("data")
         if data is None:
-            # If developer steps return legacy dict, keep it as data
             data = {k: v for k, v in raw.items() if k not in {"errors", "warnings", "metrics", "status", "step"}}
 
         errors = _as_list(raw.get("errors"))
@@ -194,7 +226,6 @@ def _coerce_step_output(step_name: str, raw: Any) -> Tuple[Any, List[Any], List[
         metrics = raw.get("metrics") if isinstance(raw.get("metrics"), dict) else {}
         return data, errors, warnings, metrics
 
-    # non-dict output
     return {"value": raw}, [], [], {}
 
 
@@ -239,7 +270,7 @@ def run_step(step_name: str, *, run_id: str) -> Dict[str, Any]:
 
         data, errors, warnings, metrics = _coerce_step_output(step_name, raw)
 
-        # ✅ FIX: if errors exist, status must be "error"
+        # If errors exist, status must be "error"
         status = "ok" if not errors else "error"
 
         _log_event("step_done", run_id=run_id, step=step_name, extra={"duration_ms": duration_ms, "status": status})
@@ -414,10 +445,17 @@ def run_pipeline(
         "steps_returned": len(results),
     }
 
+    if has_errors:
+        base["status"] = "error"
+
     if (unknown_steps or selector_unknown) and not strict:
         base["warning"] = "unknown_values_ignored"
 
-    _log_event("pipeline_done", run_id=run_id, extra={"ok": ok_count, "errors": error_count, "skipped": skipped_count})
+    _log_event(
+        "pipeline_done",
+        run_id=run_id,
+        extra={"ok": ok_count, "errors": error_count, "skipped": skipped_count},
+    )
     set_last_run(base)
     return base
 
