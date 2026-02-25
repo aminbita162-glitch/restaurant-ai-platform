@@ -2,11 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, Optional, List
-import os
 import time
 import uuid
-import json
-import sqlite3
 
 
 def _utc_ts() -> str:
@@ -176,94 +173,32 @@ def _run_pipeline(orchestrator: Any, options: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ----------------------------
-# Persistence (SQLite)
-#   - stores last run(s) on disk
-#   - path is configurable via env PIPELINE_DB_PATH
+# Persistence (core/persistence.py)
 # ----------------------------
-_DB_PATH_DEFAULT = "/tmp/restaurant_ai_pipeline.db"
-_DB_PATH = os.getenv("PIPELINE_DB_PATH", _DB_PATH_DEFAULT)
+_PERSIST_AVAILABLE = False
+try:
+    from .core import persistence  # type: ignore
+
+    _PERSIST_AVAILABLE = True
+except Exception as e:
+    _log(f"persistence_not_available: {type(e).__name__}: {e}")
+    _PERSIST_AVAILABLE = False
 
 
-def _get_connection() -> sqlite3.Connection:
-    # check_same_thread=False because WSGI servers can use threads
-    conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def _init_db() -> None:
+def _persist_save(payload: Dict[str, Any]) -> None:
+    if not _PERSIST_AVAILABLE:
+        return
     try:
-        conn = _get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS pipeline_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_id TEXT,
-                request_id TEXT,
-                status TEXT,
-                duration_ms INTEGER,
-                stored_at TEXT,
-                payload_json TEXT
-            )
-            """
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        _log(f"persistence_init_failed: {type(e).__name__}: {e}")
-
-
-def _save_run(payload: Dict[str, Any], *, status: str) -> None:
-    try:
-        _init_db()
-        conn = _get_connection()
-        cursor = conn.cursor()
-
-        run_id = str(payload.get("run_id") or "")
-        request_id = str(payload.get("request_id") or "")
-        duration_ms_val = payload.get("duration_ms")
-        duration_ms = int(duration_ms_val) if isinstance(duration_ms_val, (int, float)) else 0
-
-        cursor.execute(
-            """
-            INSERT INTO pipeline_runs (run_id, request_id, status, duration_ms, stored_at, payload_json)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (run_id, request_id, status, duration_ms, _utc_ts(), json.dumps(payload, ensure_ascii=False)),
-        )
-
-        conn.commit()
-        conn.close()
+        persistence.save_run(payload)  # type: ignore[attr-defined]
     except Exception as e:
         _log(f"persistence_save_failed: {type(e).__name__}: {e}")
 
 
-def _get_last_run() -> Optional[Dict[str, Any]]:
+def _persist_get_last() -> Optional[Dict[str, Any]]:
+    if not _PERSIST_AVAILABLE:
+        return None
     try:
-        _init_db()
-        conn = _get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT payload_json, stored_at, status
-            FROM pipeline_runs
-            ORDER BY id DESC
-            LIMIT 1
-            """
-        )
-        row = cursor.fetchone()
-        conn.close()
-
-        if not row:
-            return None
-
-        payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
-        if isinstance(payload, dict):
-            payload.setdefault("stored_at", row["stored_at"])
-            payload.setdefault("stored_status", row["status"])
-            return payload
-        return {"stored_at": row["stored_at"], "stored_status": row["status"], "payload": payload}
+        return persistence.get_last_run()  # type: ignore[attr-defined]
     except Exception as e:
         _log(f"persistence_read_failed: {type(e).__name__}: {e}")
         return None
@@ -300,6 +235,10 @@ try:
                 "service": "restaurant-ai-platform",
                 "pipeline": {
                     "status": "ready",
+                    "persistence": {
+                        "enabled": bool(_PERSIST_AVAILABLE),
+                        "module": "core.persistence",
+                    },
                     "supported_options_now": {
                         "dry_run": True,
                         "steps": True,
@@ -346,7 +285,7 @@ try:
     @bp.get("/pipeline/last_run")
     @bp.get("/api/v1/pipeline/last_run")
     def pipeline_last_run() -> Any:
-        last_run = _get_last_run()
+        last_run = _persist_get_last()
         if last_run is None:
             return _response_ok(
                 {
@@ -385,33 +324,32 @@ try:
                 duration_ms = int((time.time() - started) * 1000)
                 run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{request_id[:8]}"
 
+                stored_status = "ok"
+                if isinstance(result, dict) and isinstance(result.get("status"), str):
+                    stored_status = str(result["status"])
+
                 response_payload = {
                     "request_id": request_id,
                     "run_id": run_id,
+                    "status": stored_status,  # مهم: وضعیت را در سطح بالا ذخیره می‌کنیم
                     "duration_ms": duration_ms,
                     "requested_payload": {"_via": "browser_get", **options},
                     "orchestrator_options_used": options,
                     "result": result,
                 }
 
-                stored_status = "ok"
-                try:
-                    if isinstance(result, dict) and isinstance(result.get("status"), str):
-                        stored_status = str(result["status"])
-                except Exception:
-                    stored_status = "ok"
-
-                _save_run(response_payload, status=stored_status)
+                _persist_save(response_payload)
                 return _response_ok(response_payload)
             except Exception as e:
                 _log(f"pipeline_run_browser failed: {type(e).__name__}: {e}")
                 err_payload = {
                     "request_id": request_id,
+                    "status": "error",
                     "requested_payload": {"_via": "browser_get", **options},
                     "error_type": type(e).__name__,
                     "error": str(e),
                 }
-                _save_run(err_payload, status="error")
+                _persist_save(err_payload)
                 return _response_error("Pipeline execution failed", 500, details=err_payload)
 
         return _response_ok(
@@ -453,33 +391,32 @@ try:
             duration_ms = int((time.time() - started) * 1000)
             run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{request_id[:8]}"
 
+            stored_status = "ok"
+            if isinstance(result, dict) and isinstance(result.get("status"), str):
+                stored_status = str(result["status"])
+
             response_payload = {
                 "request_id": request_id,
                 "run_id": run_id,
+                "status": stored_status,  # مهم: وضعیت را در سطح بالا ذخیره می‌کنیم
                 "duration_ms": duration_ms,
                 "requested_payload": payload,
                 "orchestrator_options_used": options,
                 "result": result,
             }
 
-            stored_status = "ok"
-            try:
-                if isinstance(result, dict) and isinstance(result.get("status"), str):
-                    stored_status = str(result["status"])
-            except Exception:
-                stored_status = "ok"
-
-            _save_run(response_payload, status=stored_status)
+            _persist_save(response_payload)
             return _response_ok(response_payload)
 
         except Exception as e:
             _log(f"pipeline_run_post failed: {type(e).__name__}: {e}")
             err_payload = {
                 "request_id": request_id,
+                "status": "error",
                 "error_type": type(e).__name__,
                 "error": str(e),
             }
-            _save_run(err_payload, status="error")
+            _persist_save(err_payload)
             return _response_error("Pipeline execution failed", 500, details=err_payload)
 
 except Exception as e:
@@ -513,16 +450,19 @@ def run() -> Dict[str, Any]:
     """
     _log("api_serving.run() started")
 
-    # Try init DB early so we surface issues in logs (but do not fail the step)
-    _init_db()
+    # init DB early (but never fail the step)
+    if _PERSIST_AVAILABLE:
+        try:
+            persistence.init_db()  # type: ignore[attr-defined]
+        except Exception as e:
+            _log(f"persistence_init_failed: {type(e).__name__}: {e}")
 
     result: Dict[str, Any] = {
         "api_serving_status": "ok",
         "blueprint_available": bp is not None,
         "persistence": {
-            "enabled": True,
-            "db_path": _DB_PATH,
-            "note": "SQLite on Render may be ephemeral depending on instance lifecycle. For durable storage, use a managed DB.",
+            "enabled": bool(_PERSIST_AVAILABLE),
+            "module": "core.persistence",
         },
         "expected_endpoints": [
             "/health",
