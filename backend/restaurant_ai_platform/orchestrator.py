@@ -13,6 +13,7 @@ PIPELINE_ORDER: List[str] = [
     "2_data_warehouse",
     "3_feature_engineering",
     "4_feature_store_sync",
+    "model_registry",
     "5_ml_prediction",
     "6_optimization",
     "7_api_serving",
@@ -190,15 +191,16 @@ def _coerce_step_output(step_name: str, raw: Any) -> Tuple[Any, List[Any], List[
     return {"value": raw}, [], [], {}
 
 
-def run_step(step_name: str, *, run_id: str) -> Dict[str, Any]:
+def run_step(step_name: str, *, run_id: str, context: Dict[str, Any]) -> Dict[str, Any]:
     _log_event("step_start", run_id=run_id, step=step_name)
 
-    registry: Dict[str, Callable[[], Dict[str, Any]]] = {
+    registry: Dict[str, Callable[[Dict[str, Any]], Any]] = {
         "real_data_ingestion": _run_real_data_ingestion,
         "1_data_ingestion": _run_data_ingestion,
         "2_data_warehouse": _run_data_warehouse,
         "3_feature_engineering": _run_feature_engineering,
         "4_feature_store_sync": _run_feature_store_sync,
+        "model_registry": _run_model_registry,
         "5_ml_prediction": _run_ml_prediction,
         "6_optimization": _run_optimization,
         "7_api_serving": _run_api_serving,
@@ -227,7 +229,7 @@ def run_step(step_name: str, *, run_id: str) -> Dict[str, Any]:
         )
 
     try:
-        raw = fn()
+        raw = fn(context)
         ended_at = _utc_ts()
         duration_ms = int((time.time() - t0) * 1000)
 
@@ -372,9 +374,15 @@ def run_pipeline(
     _log_event("pipeline_start", run_id=run_id, extra={"steps_planned": len(plan2)})
 
     results: List[Dict[str, Any]] = []
+    context: Dict[str, Any] = {}
+
     for step in plan2:
-        r = run_step(step, run_id=run_id)
+        r = run_step(step, run_id=run_id, context=context)
         results.append(r)
+
+        # store step data for downstream steps
+        if isinstance(r, dict) and r.get("step"):
+            context[r["step"]] = r.get("data", {})
 
         if stop_on_error and r.get("status") == "error":
             base["stopped_early"] = True
@@ -405,52 +413,71 @@ def run_pipeline(
     return base
 
 
-def _run_real_data_ingestion() -> Dict[str, Any]:
+def _run_real_data_ingestion(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import real_data_ingestion
     return real_data_ingestion.run()
 
 
-def _run_data_ingestion() -> Dict[str, Any]:
+def _run_data_ingestion(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import data_ingestion
     return data_ingestion.run()
 
 
-def _run_data_warehouse() -> Dict[str, Any]:
+def _run_data_warehouse(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import data_warehouse
     return data_warehouse.run()
 
 
-def _run_feature_engineering() -> Dict[str, Any]:
+def _run_feature_engineering(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import feature_engineering
     return feature_engineering.run()
 
 
-def _run_feature_store_sync() -> Dict[str, Any]:
+def _run_feature_store_sync(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import feature_store_sync
     return feature_store_sync.run()
 
 
-def _run_ml_prediction() -> Dict[str, Any]:
+def _run_model_registry(context: Dict[str, Any]) -> Dict[str, Any]:
+    from . import model_registry
+
+    ingestion = context.get("1_data_ingestion") or {}
+    sales = ingestion.get("sales", [])
+
+    if not isinstance(sales, list) or not sales:
+        raise ValueError("Model registry requires non-empty sales data from 1_data_ingestion")
+
+    features = {"sales": sales}
+    model = model_registry.train_and_save_model(features)
+
+    return {
+        "model_registry_status": "ok",
+        "registered_model": model,
+        "timestamp": _utc_ts(),
+    }
+
+
+def _run_ml_prediction(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import ml_prediction
     return ml_prediction.run()
 
 
-def _run_optimization() -> Dict[str, Any]:
+def _run_optimization(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import optimization
     return optimization.run()
 
 
-def _run_api_serving() -> Dict[str, Any]:
+def _run_api_serving(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import api_serving
     return api_serving.run()
 
 
-def _run_dashboard_update() -> Dict[str, Any]:
+def _run_dashboard_update(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import dashboard_update
     return dashboard_update.run()
 
 
-def _run_model_training() -> Dict[str, Any]:
+def _run_model_training(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import model_training
     return model_training.run()
 
