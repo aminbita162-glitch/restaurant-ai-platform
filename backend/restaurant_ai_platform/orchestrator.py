@@ -5,6 +5,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import time
 import uuid
 import threading
+import os
+import inspect
 
 
 PIPELINE_ORDER: List[str] = [
@@ -114,7 +116,7 @@ def _select_plan(requested_steps: Optional[List[str]]) -> Tuple[List[str], List[
         else:
             unknown.append(s)
 
-    # dedupe keep order
+    # Dedupe, keep order
     seen: set[str] = set()
     unique_plan: List[str] = []
     for s in plan:
@@ -391,7 +393,6 @@ def run_pipeline(
         r = run_step(step, run_id=run_id, context=context)
         results.append(r)
 
-        # store step data for downstream steps
         if isinstance(r, dict) and r.get("step"):
             context[r["step"]] = r.get("data", {})
             context["_last_step"] = r.get("step")
@@ -428,38 +429,33 @@ def run_pipeline(
 
 def _run_real_data_ingestion(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import real_data_ingestion
-
     return real_data_ingestion.run()
 
 
 def _run_data_ingestion(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import data_ingestion
-
     return data_ingestion.run()
 
 
 def _run_data_warehouse(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import data_warehouse
-
     return data_warehouse.run()
 
 
 def _run_feature_engineering(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import feature_engineering
-
     return feature_engineering.run()
 
 
 def _run_feature_store_sync(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import feature_store_sync
-
     return feature_store_sync.run()
 
 
 def _run_model_registry(context: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Registers a simple mock model. If sales data is unavailable (e.g., when running a partial
-    pipeline starting after ingestion), the step returns an "ok" status with a warning.
+    Registers a simple model. If sales data is unavailable, returns OK with warnings and
+    marks the internal status as "skipped" (so the pipeline stays green).
     """
     from . import model_registry
 
@@ -501,77 +497,118 @@ def _run_model_registry(context: Dict[str, Any]) -> Dict[str, Any]:
 
 def _run_ml_prediction(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import ml_prediction
-
     return ml_prediction.run()
 
 
 def _run_optimization(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import optimization
-
     return optimization.run()
 
 
 def _run_gpt_insight(context: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Optional GPT step. If gpt_insight.py is missing or not ready, return ok with a warning
-    (so the pipeline stays green).
+    Optional GPT step.
+    - Never makes the pipeline red by itself.
+    - If OPENAI_API_KEY missing or imports fail -> returns OK with warnings and marks as skipped.
+    - Calls gpt_insight.run() with context if it accepts one arg, otherwise calls it with no args.
     """
-    try:
-        from . import gpt_insight  # type: ignore
-    except Exception as e:
+
+    def wrap_skipped(reason: str, warning: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        warnings = [warning] if warning else []
         return {
             "data": {
                 "gpt_insight_status": "skipped",
-                "reason": f"import_failed:{type(e).__name__}",
+                "reason": reason,
                 "timestamp": _utc_ts(),
             },
             "errors": [],
-            "warnings": [{"type": type(e).__name__, "message": str(e)}],
+            "warnings": warnings,
             "metrics": {},
         }
 
-    try:
-        if hasattr(gpt_insight, "run"):
-            out = gpt_insight.run(context)  # type: ignore[misc]
-            return out if isinstance(out, dict) else {"gpt_insight_status": "ok", "value": out, "timestamp": _utc_ts()}
+    def wrap_ok(payload: Any, warnings: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        if isinstance(payload, dict) and (
+            "data" in payload or "errors" in payload or "warnings" in payload or "metrics" in payload
+        ):
+            errs = _as_list(payload.get("errors"))
+            warns = _as_list(payload.get("warnings"))
+            if errs:
+                for e in errs:
+                    warns.append({"type": "UpstreamError", "message": str(e)})
+                payload["errors"] = []
+                payload["warnings"] = warns
+            return payload
+
         return {
             "data": {
-                "gpt_insight_status": "skipped",
-                "reason": "no_run_function",
+                "gpt_insight_status": "ok",
+                "result": payload,
                 "timestamp": _utc_ts(),
             },
             "errors": [],
-            "warnings": [{"type": "MissingHandler", "message": "gpt_insight.run(context) not found"}],
+            "warnings": warnings or [],
             "metrics": {},
         }
+
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return wrap_skipped(
+            "OPENAI_API_KEY_not_set",
+            {"type": "MissingConfig", "message": "OPENAI_API_KEY is not set in environment variables."},
+        )
+
+    try:
+        from . import gpt_insight  # type: ignore
     except Exception as e:
-        return {
-            "data": {
-                "gpt_insight_status": "error",
-                "reason": f"{type(e).__name__}:{e}",
-                "timestamp": _utc_ts(),
-            },
-            "errors": [{"type": type(e).__name__, "message": str(e)}],
-            "warnings": [],
-            "metrics": {},
-        }
+        return wrap_skipped(
+            f"import_failed:{type(e).__name__}",
+            {"type": type(e).__name__, "message": str(e)},
+        )
+
+    if not hasattr(gpt_insight, "run"):
+        return wrap_skipped(
+            "no_run_function",
+            {"type": "MissingHandler", "message": "gpt_insight.run(...) not found"},
+        )
+
+    run_fn = getattr(gpt_insight, "run")
+
+    try:
+        sig = inspect.signature(run_fn)
+        params = list(sig.parameters.values())
+
+        if len(params) == 0:
+            out = run_fn()  # type: ignore[misc]
+            return wrap_ok(out)
+
+        if len(params) == 1:
+            out = run_fn(context)  # type: ignore[misc]
+            return wrap_ok(out)
+
+        return wrap_skipped(
+            "invalid_run_signature",
+            {"type": "BadHandler", "message": "gpt_insight.run has an unexpected signature."},
+        )
+
+    except Exception as e:
+        return wrap_skipped(
+            f"runtime_failed:{type(e).__name__}",
+            {"type": type(e).__name__, "message": str(e)},
+        )
 
 
 def _run_api_serving(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import api_serving
-
     return api_serving.run()
 
 
 def _run_dashboard_update(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import dashboard_update
-
     return dashboard_update.run()
 
 
 def _run_model_training(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import model_training
-
     return model_training.run()
 
 
