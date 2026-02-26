@@ -256,8 +256,13 @@ try:
                             "/api/v1/pipeline/last-run",
                             "/pipeline/last_run",
                             "/api/v1/pipeline/last_run",
+                            "/pipeline/lastrun",
+                            "/api/v1/pipeline/lastrun",
                         ],
-                        "pipeline_run_post": ["/pipeline/run (POST)", "/api/v1/pipeline/run (POST)"],
+                        "pipeline_run_post": [
+                            "/pipeline/run (POST)",
+                            "/api/v1/pipeline/run (POST)",
+                        ],
                         "pipeline_run_browser": [
                             "/pipeline/run?execute=1&confirm=yes (GET)",
                             "/api/v1/pipeline/run?execute=1&confirm=yes (GET)",
@@ -284,6 +289,8 @@ try:
     @bp.get("/api/v1/pipeline/last-run")
     @bp.get("/pipeline/last_run")
     @bp.get("/api/v1/pipeline/last_run")
+    @bp.get("/pipeline/lastrun")
+    @bp.get("/api/v1/pipeline/lastrun")
     def pipeline_last_run() -> Any:
         last_run = _persist_get_last()
         if last_run is None:
@@ -331,7 +338,7 @@ try:
                 response_payload = {
                     "request_id": request_id,
                     "run_id": run_id,
-                    "status": stored_status,  # مهم: وضعیت را در سطح بالا ذخیره می‌کنیم
+                    "status": stored_status,
                     "duration_ms": duration_ms,
                     "requested_payload": {"_via": "browser_get", **options},
                     "orchestrator_options_used": options,
@@ -355,8 +362,10 @@ try:
         return _response_ok(
             {
                 "service": "restaurant-ai-platform",
-                "message": "Use POST to /api/v1/pipeline/run for normal clients. "
-                "For Safari browser testing, call GET with ?execute=1&confirm=yes.",
+                "message": (
+                    "Use POST to /api/v1/pipeline/run for normal clients. "
+                    "For Safari browser testing, call GET with ?execute=1&confirm=yes."
+                ),
                 "how_to_test_in_browser": {
                     "safe_check": "/api/v1/pipeline/status",
                     "execute_pipeline": "/api/v1/pipeline/run?execute=1&confirm=yes",
@@ -398,7 +407,7 @@ try:
             response_payload = {
                 "request_id": request_id,
                 "run_id": run_id,
-                "status": stored_status,  # مهم: وضعیت را در سطح بالا ذخیره می‌کنیم
+                "status": stored_status,
                 "duration_ms": duration_ms,
                 "requested_payload": payload,
                 "orchestrator_options_used": options,
@@ -469,12 +478,14 @@ def run() -> Dict[str, Any]:
             "/pipeline/status",
             "/pipeline/last-run",
             "/pipeline/last_run",
+            "/pipeline/lastrun",
             "/pipeline/run (POST)",
             "/pipeline/run?execute=1&confirm=yes (GET)",
             "/api/v1/health",
             "/api/v1/pipeline/status",
             "/api/v1/pipeline/last-run",
             "/api/v1/pipeline/last_run",
+            "/api/v1/pipeline/lastrun",
             "/api/v1/pipeline/run (POST)",
             "/api/v1/pipeline/run?execute=1&confirm=yes (GET)",
         ],
