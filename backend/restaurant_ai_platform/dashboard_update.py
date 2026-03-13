@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 DEFAULT_RESTAURANT_ID = "restaurant_001"
@@ -17,8 +17,10 @@ def _estimate_inventory(predicted_sales: float) -> Dict[str, float]:
     }
 
 
-def run() -> Dict[str, Any]:
+def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     print(f"[{_utc_ts()}] START dashboard_update")
+
+    context = context or {}
 
     try:
         from . import ml_prediction
@@ -31,43 +33,59 @@ def run() -> Dict[str, Any]:
             "timestamp": _utc_ts(),
         }
 
-    try:
-        prediction_result = ml_prediction.run()
-        prediction_data = prediction_result.get("data", {})
-    except Exception as e:
-        return {
-            "dashboard_update_status": "error",
-            "reason": f"prediction_failed:{type(e).__name__}:{e}",
-            "timestamp": _utc_ts(),
-        }
+    prediction_data: Dict[str, Any] = {}
+    if isinstance(context.get("5_ml_prediction"), dict):
+        prediction_data = context.get("5_ml_prediction", {})
 
-    try:
-        optimization_result = optimization.run()
-    except Exception as e:
-        return {
-            "dashboard_update_status": "error",
-            "reason": f"optimization_failed:{type(e).__name__}:{e}",
-            "timestamp": _utc_ts(),
-        }
-
-    try:
-        gpt_result = gpt_insight.run(
-            {
-                "5_ml_prediction": prediction_data,
+    if not prediction_data:
+        try:
+            prediction_result = ml_prediction.run()
+            prediction_data = prediction_result.get("data", {})
+        except Exception as e:
+            return {
+                "dashboard_update_status": "error",
+                "reason": f"prediction_failed:{type(e).__name__}:{e}",
+                "timestamp": _utc_ts(),
             }
-        )
-        gpt_data = gpt_result.get("data", {}) if isinstance(gpt_result, dict) else {}
-    except Exception as e:
-        gpt_data = {
-            "gpt_insight_status": "error",
-            "reason": f"gpt_insight_failed:{type(e).__name__}:{e}",
-        }
+
+    optimization_data: Dict[str, Any] = {}
+    if isinstance(context.get("6_optimization"), dict):
+        optimization_data = context.get("6_optimization", {})
+
+    if not optimization_data:
+        try:
+            optimization_result = optimization.run()
+            optimization_data = optimization_result
+        except Exception as e:
+            return {
+                "dashboard_update_status": "error",
+                "reason": f"optimization_failed:{type(e).__name__}:{e}",
+                "timestamp": _utc_ts(),
+            }
+
+    gpt_data: Dict[str, Any] = {}
+    if isinstance(context.get("gpt_insight"), dict):
+        gpt_data = context.get("gpt_insight", {})
+
+    if not gpt_data:
+        try:
+            gpt_result = gpt_insight.run(
+                {
+                    "5_ml_prediction": prediction_data,
+                }
+            )
+            gpt_data = gpt_result.get("data", {}) if isinstance(gpt_result, dict) else {}
+        except Exception as e:
+            gpt_data = {
+                "gpt_insight_status": "error",
+                "reason": f"gpt_insight_failed:{type(e).__name__}:{e}",
+            }
 
     restaurant_id = prediction_data.get("restaurant_id", DEFAULT_RESTAURANT_ID)
     location_id = prediction_data.get("location_id", DEFAULT_LOCATION_ID)
 
     forecast = prediction_data.get("forecast", [])
-    staffing_plan = optimization_result.get("staffing_plan", [])
+    staffing_plan = optimization_data.get("staffing_plan", [])
 
     inventory_plan: List[Dict[str, Any]] = []
 
