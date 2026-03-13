@@ -385,6 +385,12 @@ def run_pipeline(
         "_started_at": _utc_ts(),
     }
 
+    if isinstance(options, dict):
+        if options.get("restaurant_id"):
+            context["restaurant_id"] = options.get("restaurant_id")
+        if options.get("location_id"):
+            context["location_id"] = options.get("location_id")
+
     for step in plan2:
         r = run_step(step, run_id=run_id, context=context)
         results.append(r)
@@ -447,7 +453,7 @@ def _run_real_data_ingestion(context: Dict[str, Any]) -> Dict[str, Any]:
 
 def _run_data_ingestion(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import data_ingestion
-    return data_ingestion.run()
+    return data_ingestion.run(context)
 
 
 def _run_data_warehouse(context: Dict[str, Any]) -> Dict[str, Any]:
@@ -481,7 +487,13 @@ def _run_feature_engineering(context: Dict[str, Any]) -> Dict[str, Any]:
 
 def _run_feature_store_sync(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import feature_store_sync
-    return feature_store_sync.run()
+
+    payload = {
+        "restaurant_id": context.get("restaurant_id"),
+        "location_id": context.get("location_id"),
+        "generated_features": context.get("generated_features"),
+    }
+    return feature_store_sync.run(payload)
 
 
 def _run_model_registry(context: Dict[str, Any]) -> Dict[str, Any]:
