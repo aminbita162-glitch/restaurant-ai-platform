@@ -10,34 +10,46 @@ DATA_FILE_PATH = os.path.join(
     "upload_sales.csv",
 )
 
+DEFAULT_RESTAURANT_ID = "restaurant_001"
+DEFAULT_LOCATION_ID = "location_001"
+
 
 def _load_sales_from_csv(path: str):
     rows = []
+
     if not os.path.exists(path):
         return None, "file_not_found"
 
     try:
         with open(path, mode="r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
+
             for row in reader:
                 rows.append(
                     {
+                        "restaurant_id": row.get("restaurant_id", DEFAULT_RESTAURANT_ID),
+                        "location_id": row.get("location_id", DEFAULT_LOCATION_ID),
                         "date": row.get("date"),
                         "daily_sales_total": float(row.get("daily_sales_total", 0)),
                     }
                 )
+
         return rows, None
+
     except Exception as e:
         return None, str(e)
 
 
 def run() -> dict:
+
     print(f"[{datetime.utcnow().isoformat()}] step=1_data_ingestion status=started")
 
     sales_data, error = _load_sales_from_csv(DATA_FILE_PATH)
 
     if sales_data:
         result = {
+            "restaurant_id": DEFAULT_RESTAURANT_ID,
+            "location_id": DEFAULT_LOCATION_ID,
             "sales_source": "csv_file",
             "sales_rows_loaded": len(sales_data),
             "sales": sales_data,
@@ -45,8 +57,11 @@ def run() -> dict:
             "attendance": "simulated_attendance_data",
             "timestamp": datetime.utcnow().isoformat(),
         }
+
     else:
         result = {
+            "restaurant_id": DEFAULT_RESTAURANT_ID,
+            "location_id": DEFAULT_LOCATION_ID,
             "sales_source": "simulated_fallback",
             "error": error,
             "sales": "simulated_sales_data",
@@ -56,4 +71,5 @@ def run() -> dict:
         }
 
     print(f"[{datetime.utcnow().isoformat()}] step=1_data_ingestion status=completed")
+
     return result
