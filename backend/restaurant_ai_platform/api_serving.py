@@ -6,6 +6,10 @@ import time
 import uuid
 
 
+DEFAULT_RESTAURANT_ID = "restaurant_001"
+DEFAULT_LOCATION_ID = "location_001"
+
+
 def _utc_ts() -> str:
     return datetime.utcnow().isoformat()
 
@@ -65,17 +69,29 @@ def _parse_csv(value: Optional[str]) -> Optional[List[str]]:
     return parts or None
 
 
+def _collect_tenant_from_query(args: Any) -> Dict[str, str]:
+    restaurant_id = (args.get("restaurant_id") or "").strip() or DEFAULT_RESTAURANT_ID
+    location_id = (args.get("location_id") or "").strip() or DEFAULT_LOCATION_ID
+    return {
+        "restaurant_id": restaurant_id,
+        "location_id": location_id,
+    }
+
+
+def _collect_tenant_from_json(payload: Dict[str, Any]) -> Dict[str, str]:
+    restaurant_id = payload.get("restaurant_id")
+    location_id = payload.get("location_id")
+
+    restaurant_id_str = str(restaurant_id).strip() if restaurant_id is not None else ""
+    location_id_str = str(location_id).strip() if location_id is not None else ""
+
+    return {
+        "restaurant_id": restaurant_id_str or DEFAULT_RESTAURANT_ID,
+        "location_id": location_id_str or DEFAULT_LOCATION_ID,
+    }
+
+
 def _collect_options_from_query(args: Any) -> Dict[str, Any]:
-    """
-    Query params supported (passed to orchestrator):
-      - dry_run=1
-      - strict=0
-      - steps=1_data_ingestion,2_data_warehouse
-      - exclude=7_api_serving
-      - start_at=3_feature_engineering
-      - stop_after=5_ml_prediction
-      - stop_on_error=1
-    """
     options: Dict[str, Any] = {}
 
     dry_run = _parse_bool(args.get("dry_run"))
@@ -106,20 +122,11 @@ def _collect_options_from_query(args: Any) -> Dict[str, Any]:
     if stop_on_error is not None:
         options["stop_on_error"] = stop_on_error
 
+    options.update(_collect_tenant_from_query(args))
     return options
 
 
 def _collect_options_from_json(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    JSON body keys supported (passed to orchestrator):
-      - dry_run: bool
-      - strict: bool
-      - steps: list[str] or comma string
-      - exclude: list[str] or comma string
-      - start_at: str
-      - stop_after: str
-      - stop_on_error: bool
-    """
     options: Dict[str, Any] = {}
 
     if isinstance(payload.get("dry_run"), bool):
@@ -155,14 +162,11 @@ def _collect_options_from_json(payload: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(payload.get("stop_on_error"), bool):
         options["stop_on_error"] = payload["stop_on_error"]
 
+    options.update(_collect_tenant_from_json(payload))
     return options
 
 
 def _run_pipeline(orchestrator: Any, options: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Preferred: pass dict options (new orchestrator supports this).
-    Fallbacks included for older signatures.
-    """
     try:
         return orchestrator.run_pipeline(options)  # type: ignore[misc]
     except TypeError:
@@ -172,9 +176,6 @@ def _run_pipeline(orchestrator: Any, options: Dict[str, Any]) -> Dict[str, Any]:
             return orchestrator.run_pipeline()  # type: ignore[misc]
 
 
-# ----------------------------
-# Persistence (core/persistence.py)
-# ----------------------------
 _PERSIST_AVAILABLE = False
 try:
     from .core import persistence  # type: ignore
@@ -194,11 +195,20 @@ def _persist_save(payload: Dict[str, Any]) -> None:
         _log(f"persistence_save_failed: {type(e).__name__}: {e}")
 
 
-def _persist_get_last() -> Optional[Dict[str, Any]]:
+def _persist_get_last(
+    restaurant_id: Optional[str] = None,
+    location_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     if not _PERSIST_AVAILABLE:
         return None
     try:
-        return persistence.get_last_run()  # type: ignore[attr-defined]
+        return persistence.get_last_run(restaurant_id=restaurant_id, location_id=location_id)  # type: ignore[attr-defined]
+    except TypeError:
+        try:
+            return persistence.get_last_run()  # type: ignore[attr-defined]
+        except Exception as e:
+            _log(f"persistence_read_failed: {type(e).__name__}: {e}")
+            return None
     except Exception as e:
         _log(f"persistence_read_failed: {type(e).__name__}: {e}")
         return None
@@ -211,9 +221,6 @@ try:
 
     bp = Blueprint("api_serving", __name__)
 
-    # ----------------------------
-    # Health
-    # ----------------------------
     @bp.get("/health")
     @bp.get("/api/v1/health")
     def health() -> Any:
@@ -224,9 +231,6 @@ try:
             }
         )
 
-    # ----------------------------
-    # Pipeline status (docs-ish)
-    # ----------------------------
     @bp.get("/pipeline/status")
     @bp.get("/api/v1/pipeline/status")
     def pipeline_status() -> Any:
@@ -247,6 +251,8 @@ try:
                         "stop_after": True,
                         "stop_on_error": True,
                         "strict": True,
+                        "restaurant_id": True,
+                        "location_id": True,
                     },
                     "endpoints": {
                         "health": ["/health", "/api/v1/health"],
@@ -270,8 +276,10 @@ try:
                     },
                     "examples": {
                         "run_all": "/api/v1/pipeline/run?execute=1&confirm=yes",
+                        "run_for_tenant": "/api/v1/pipeline/run?execute=1&confirm=yes&restaurant_id=restaurant_001&location_id=location_001",
                         "dry_run": "/api/v1/pipeline/run?execute=1&confirm=yes&dry_run=1",
                         "last_run": "/api/v1/pipeline/last-run",
+                        "last_run_for_tenant": "/api/v1/pipeline/last-run?restaurant_id=restaurant_001&location_id=location_001",
                         "subset": "/api/v1/pipeline/run?execute=1&confirm=yes&steps=1_data_ingestion,2_data_warehouse",
                         "exclude": "/api/v1/pipeline/run?execute=1&confirm=yes&exclude=7_api_serving",
                         "range": "/api/v1/pipeline/run?execute=1&confirm=yes&start_at=3_feature_engineering&stop_after=5_ml_prediction",
@@ -282,9 +290,6 @@ try:
             }
         )
 
-    # ----------------------------
-    # Pipeline last run (aliases supported)
-    # ----------------------------
     @bp.get("/pipeline/last-run")
     @bp.get("/api/v1/pipeline/last-run")
     @bp.get("/pipeline/last_run")
@@ -292,27 +297,34 @@ try:
     @bp.get("/pipeline/lastrun")
     @bp.get("/api/v1/pipeline/lastrun")
     def pipeline_last_run() -> Any:
-        last_run = _persist_get_last()
+        tenant = _collect_tenant_from_query(request.args)
+        last_run = _persist_get_last(
+            restaurant_id=tenant["restaurant_id"],
+            location_id=tenant["location_id"],
+        )
+
         if last_run is None:
             return _response_ok(
                 {
                     "service": "restaurant-ai-platform",
+                    "restaurant_id": tenant["restaurant_id"],
+                    "location_id": tenant["location_id"],
                     "has_last_run": False,
                     "last_run": None,
-                    "message": "No pipeline run has been stored yet. Run the pipeline first.",
+                    "message": "No pipeline run has been stored yet for this tenant. Run the pipeline first.",
                 }
             )
+
         return _response_ok(
             {
                 "service": "restaurant-ai-platform",
+                "restaurant_id": tenant["restaurant_id"],
+                "location_id": tenant["location_id"],
                 "has_last_run": True,
                 "last_run": last_run,
             }
         )
 
-    # ----------------------------
-    # Pipeline run (GET helper for browsers)
-    # ----------------------------
     @bp.get("/pipeline/run")
     @bp.get("/api/v1/pipeline/run")
     def pipeline_run_browser() -> Any:
@@ -320,7 +332,7 @@ try:
         confirm = (request.args.get("confirm") or "").strip().lower()
 
         if execute in {"1", "true", "yes"} and confirm == "yes":
-            from . import orchestrator  # local import to avoid circular dependency
+            from . import orchestrator
 
             options = _collect_options_from_query(request.args)
 
@@ -340,6 +352,8 @@ try:
                     "run_id": run_id,
                     "status": stored_status,
                     "duration_ms": duration_ms,
+                    "restaurant_id": options.get("restaurant_id", DEFAULT_RESTAURANT_ID),
+                    "location_id": options.get("location_id", DEFAULT_LOCATION_ID),
                     "requested_payload": {"_via": "browser_get", **options},
                     "orchestrator_options_used": options,
                     "result": result,
@@ -352,6 +366,8 @@ try:
                 err_payload = {
                     "request_id": request_id,
                     "status": "error",
+                    "restaurant_id": options.get("restaurant_id", DEFAULT_RESTAURANT_ID),
+                    "location_id": options.get("location_id", DEFAULT_LOCATION_ID),
                     "requested_payload": {"_via": "browser_get", **options},
                     "error_type": type(e).__name__,
                     "error": str(e),
@@ -369,21 +385,20 @@ try:
                 "how_to_test_in_browser": {
                     "safe_check": "/api/v1/pipeline/status",
                     "execute_pipeline": "/api/v1/pipeline/run?execute=1&confirm=yes",
+                    "execute_pipeline_for_tenant": "/api/v1/pipeline/run?execute=1&confirm=yes&restaurant_id=restaurant_001&location_id=location_001",
                     "dry_run_example": "/api/v1/pipeline/run?execute=1&confirm=yes&dry_run=1",
                     "last_run": "/api/v1/pipeline/last-run",
+                    "last_run_for_tenant": "/api/v1/pipeline/last-run?restaurant_id=restaurant_001&location_id=location_001",
                     "steps_example": "/api/v1/pipeline/run?execute=1&confirm=yes&steps=1_data_ingestion,2_data_warehouse",
                     "range_example": "/api/v1/pipeline/run?execute=1&confirm=yes&start_at=3_feature_engineering&stop_after=5_ml_prediction",
                 },
             }
         )
 
-    # ----------------------------
-    # Pipeline run (POST)
-    # ----------------------------
     @bp.post("/pipeline/run")
     @bp.post("/api/v1/pipeline/run")
     def pipeline_run_post() -> Any:
-        from . import orchestrator  # local import to avoid circular dependency
+        from . import orchestrator
 
         started = time.time()
         request_id = uuid.uuid4().hex
@@ -394,7 +409,6 @@ try:
                 payload = {"_raw": payload}
 
             options = _collect_options_from_json(payload)
-
             result = _run_pipeline(orchestrator, options)
 
             duration_ms = int((time.time() - started) * 1000)
@@ -409,6 +423,8 @@ try:
                 "run_id": run_id,
                 "status": stored_status,
                 "duration_ms": duration_ms,
+                "restaurant_id": options.get("restaurant_id", DEFAULT_RESTAURANT_ID),
+                "location_id": options.get("location_id", DEFAULT_LOCATION_ID),
                 "requested_payload": payload,
                 "orchestrator_options_used": options,
                 "result": result,
@@ -433,14 +449,6 @@ except Exception as e:
 
 
 def register(app: Any) -> bool:
-    """
-    Call this from app_factory.py:
-
-        from . import api_serving
-        api_serving.register(app)
-
-    Returns True if blueprint was registered.
-    """
     if bp is None:
         return False
 
@@ -453,13 +461,8 @@ def register(app: Any) -> bool:
 
 
 def run() -> Dict[str, Any]:
-    """
-    Pipeline step execution.
-    Does NOT start the server.
-    """
     _log("api_serving.run() started")
 
-    # init DB early (but never fail the step)
     if _PERSIST_AVAILABLE:
         try:
             persistence.init_db()  # type: ignore[attr-defined]
