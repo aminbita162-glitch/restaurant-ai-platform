@@ -96,7 +96,7 @@ def _build_prompt(payload: Dict[str, Any]) -> str:
     lines.append("- No markdown, no extra text.")
     lines.append('- Required JSON keys: "summary", "staffing", "inventory", "waste", "notes", "risk_level", "actions".')
     lines.append('- The value of "actions" must be an array of exactly 3 short action strings.')
-    lines.append('- All other values must be short strings.")
+    lines.append('- All other values must be short strings.')
     lines.append("")
     lines.append("Business objective:")
     lines.append("- Help the manager improve operations, reduce waste, and prepare staffing and inventory correctly.")
