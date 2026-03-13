@@ -23,6 +23,7 @@ def run() -> Dict[str, Any]:
     try:
         from . import ml_prediction
         from . import optimization
+        from . import gpt_insight
     except Exception as e:
         return {
             "dashboard_update_status": "error",
@@ -49,6 +50,19 @@ def run() -> Dict[str, Any]:
             "timestamp": _utc_ts(),
         }
 
+    try:
+        gpt_result = gpt_insight.run(
+            {
+                "5_ml_prediction": prediction_data,
+            }
+        )
+        gpt_data = gpt_result.get("data", {}) if isinstance(gpt_result, dict) else {}
+    except Exception as e:
+        gpt_data = {
+            "gpt_insight_status": "error",
+            "reason": f"gpt_insight_failed:{type(e).__name__}:{e}",
+        }
+
     restaurant_id = prediction_data.get("restaurant_id", DEFAULT_RESTAURANT_ID)
     location_id = prediction_data.get("location_id", DEFAULT_LOCATION_ID)
 
@@ -70,6 +84,16 @@ def run() -> Dict[str, Any]:
             }
         )
 
+    insight_json = gpt_data.get("insight_json", {}) if isinstance(gpt_data, dict) else {}
+    risk_level = None
+    actions: List[str] = []
+
+    if isinstance(insight_json, dict):
+        risk_level = insight_json.get("risk_level")
+        raw_actions = insight_json.get("actions", [])
+        if isinstance(raw_actions, list):
+            actions = [str(x) for x in raw_actions]
+
     result = {
         "dashboard_update_status": "ok",
         "dashboard_refreshed": True,
@@ -78,6 +102,10 @@ def run() -> Dict[str, Any]:
         "forecast": forecast,
         "staffing_plan": staffing_plan,
         "inventory_plan": inventory_plan,
+        "gpt_insight_status": gpt_data.get("gpt_insight_status"),
+        "insight_json": insight_json,
+        "risk_level": risk_level,
+        "actions": actions,
         "timestamp": _utc_ts(),
     }
 
