@@ -645,7 +645,7 @@ def _run_api_serving(context: Dict[str, Any]) -> Dict[str, Any]:
 
 def _run_dashboard_update(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import dashboard_update
-    return dashboard_update.run()
+    return dashboard_update.run(context)
 
 
 def _run_model_training(context: Dict[str, Any]) -> Dict[str, Any]:
