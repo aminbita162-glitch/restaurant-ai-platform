@@ -25,9 +25,6 @@ PIPELINE_ORDER: List[str] = [
 ]
 
 
-# ----------------------------
-# Last-run storage (in-memory)
-# ----------------------------
 _LAST_RUN_LOCK = threading.Lock()
 _LAST_RUN: Optional[Dict[str, Any]] = None
 
@@ -116,7 +113,6 @@ def _select_plan(requested_steps: Optional[List[str]]) -> Tuple[List[str], List[
         else:
             unknown.append(s)
 
-    # Dedupe, keep order
     seen: set[str] = set()
     unique_plan: List[str] = []
     for s in plan:
@@ -394,9 +390,26 @@ def run_pipeline(
         results.append(r)
 
         if isinstance(r, dict) and r.get("step"):
-            context[r["step"]] = r.get("data", {})
-            context["_last_step"] = r.get("step")
+            step_name = str(r.get("step"))
+            step_data = r.get("data", {})
+            context[step_name] = step_data
+            context["_last_step"] = step_name
             context["_last_status"] = r.get("status")
+
+            if step_name == "1_data_ingestion" and isinstance(step_data, dict):
+                context["restaurant_id"] = step_data.get("restaurant_id")
+                context["location_id"] = step_data.get("location_id")
+                context["sales"] = step_data.get("sales")
+                context["inventory"] = step_data.get("inventory")
+                context["attendance"] = step_data.get("attendance")
+
+            if step_name == "2_data_warehouse" and isinstance(step_data, dict):
+                context["sales_records"] = step_data.get("sales_records")
+                context["inventory_records"] = step_data.get("inventory_records")
+                context["attendance_records"] = step_data.get("attendance_records")
+
+            if step_name == "3_feature_engineering" and isinstance(step_data, dict):
+                context["generated_features"] = step_data.get("generated_features")
 
         if stop_on_error and r.get("status") == "error":
             base["stopped_early"] = True
@@ -439,12 +452,31 @@ def _run_data_ingestion(context: Dict[str, Any]) -> Dict[str, Any]:
 
 def _run_data_warehouse(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import data_warehouse
-    return data_warehouse.run()
+
+    payload = {
+        "restaurant_id": context.get("restaurant_id"),
+        "location_id": context.get("location_id"),
+        "sales": context.get("sales"),
+        "inventory": context.get("inventory"),
+        "attendance": context.get("attendance"),
+    }
+    return data_warehouse.run(payload)
 
 
 def _run_feature_engineering(context: Dict[str, Any]) -> Dict[str, Any]:
     from . import feature_engineering
-    return feature_engineering.run()
+
+    payload = {
+        "restaurant_id": context.get("restaurant_id"),
+        "location_id": context.get("location_id"),
+        "sales": context.get("sales"),
+        "inventory": context.get("inventory"),
+        "attendance": context.get("attendance"),
+        "sales_records": context.get("sales_records"),
+        "inventory_records": context.get("inventory_records"),
+        "attendance_records": context.get("attendance_records"),
+    }
+    return feature_engineering.run(payload)
 
 
 def _run_feature_store_sync(context: Dict[str, Any]) -> Dict[str, Any]:
@@ -453,19 +485,18 @@ def _run_feature_store_sync(context: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _run_model_registry(context: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Registers a simple model. If sales data is unavailable, returns OK with warnings and
-    marks the internal status as "skipped" (so the pipeline stays green).
-    """
     from . import model_registry
 
-    ingestion = context.get("1_data_ingestion") or {}
-    sales = ingestion.get("sales", [])
+    sales = context.get("sales", [])
+    restaurant_id = str(context.get("restaurant_id") or "restaurant_001")
+    location_id = str(context.get("location_id") or "location_001")
 
     if not isinstance(sales, list) or not sales:
         return {
             "data": {
                 "model_registry_status": "skipped",
+                "restaurant_id": restaurant_id,
+                "location_id": location_id,
                 "reason": "missing_sales_data_from_1_data_ingestion",
                 "timestamp": _utc_ts(),
             },
@@ -473,19 +504,24 @@ def _run_model_registry(context: Dict[str, Any]) -> Dict[str, Any]:
             "warnings": [
                 {
                     "type": "MissingInput",
-                    "message": "No sales data found in context for 1_data_ingestion. "
-                    "Run ingestion before model_registry to register a model.",
+                    "message": "No sales data found in context for 1_data_ingestion. Run ingestion before model_registry to register a model.",
                 }
             ],
             "metrics": {},
         }
 
     features = {"sales": sales}
-    model = model_registry.train_and_save_model(features)
+    model = model_registry.train_and_save_model(
+        features,
+        restaurant_id=restaurant_id,
+        location_id=location_id,
+    )
 
     return {
         "data": {
             "model_registry_status": "ok",
+            "restaurant_id": restaurant_id,
+            "location_id": location_id,
             "registered_model": model,
             "timestamp": _utc_ts(),
         },
@@ -506,13 +542,6 @@ def _run_optimization(context: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _run_gpt_insight(context: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Optional GPT step.
-    - Never makes the pipeline red by itself.
-    - If OPENAI_API_KEY missing or imports fail -> returns OK with warnings and marks as skipped.
-    - Calls gpt_insight.run() with context if it accepts one arg, otherwise calls it with no args.
-    """
-
     def wrap_skipped(reason: str, warning: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         warnings = [warning] if warning else []
         return {
