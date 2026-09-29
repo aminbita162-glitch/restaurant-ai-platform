@@ -303,9 +303,22 @@ Tests:
   No output field claims MRP.
 Commit message: "fix: honest inventory rule — fixed ratios labelled rule, error on missing input"
 
-PHASE 12+ — only after owner approval
+PHASE 12 — HONEST WASTE RULE
+Allowed files:
+  backend/restaurant_ai_platform/dashboard_update.py
+Work:
+  Waste output must be calculated from real inputs or return status=error.
+  Do not leave waste as a named empty field.
+  Do not invent waste quantities.
+  Payload field method must be rule, never ml.
+Tests:
+  Missing inputs return a stable error code and no waste quantity.
+  When inputs exist, waste is numeric and method=rule.
+Commit message: "fix: honest waste rule — calculated from real inputs, error on missing data"
+
+PHASE 13+ — only after owner approval
 Security baseline, async jobs, forecast benchmarks,
-waste engines, AI gateway.
+AI gateway.
 Each later phase must be written into this file before the agent starts it.
 
 
