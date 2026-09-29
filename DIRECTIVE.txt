@@ -316,7 +316,23 @@ Tests:
   When inputs exist, waste is numeric and method=rule.
 Commit message: "fix: honest waste rule — calculated from real inputs, error on missing data"
 
-PHASE 13+ — only after owner approval
+PHASE 13 — SMOKE CI
+Allowed files:
+  .github/workflows/ci.yml
+  backend/tests/test_fail_closed.py
+Work:
+  Add a GitHub Actions workflow on push to main.
+  The workflow runs a small Python test file.
+  Tests must cover: missing sales ingestion error, missing tenant last-run error,
+  forecast under 7 days error.
+  Do not add deploy steps.
+  Do not edit product modules.
+Tests:
+  ci.yml exists and runs the test file.
+  test_fail_closed.py fails closed on the three cases above.
+Commit message: "feat: smoke CI — fail-closed tests for ingestion, tenant, forecast"
+
+PHASE 14+ — only after owner approval
 Security baseline, async jobs, forecast benchmarks,
 AI gateway.
 Each later phase must be written into this file before the agent starts it.
