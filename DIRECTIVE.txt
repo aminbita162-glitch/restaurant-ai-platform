@@ -138,7 +138,21 @@ plan section; add a Releases note that no GitHub Release exists yet.
 Tests: README does not claim production-ready; author names are present.
 Commit message: "docs: honest README with author and engineering plan"
 
-PHASE 1+ — only after owner approval
+PHASE 1 — API SAFETY SURFACE
+Allowed files:
+  backend/restaurant_ai_platform/api_serving.py
+  backend/restaurant_ai_platform/app_factory.py
+Work:
+  Stop side-effecting GET /pipeline/run on the production routes.
+  Return stable public error codes. Do not return raw exception text to the client.
+  Add request_id on API responses.
+Tests:
+  GET execute path no longer runs the pipeline.
+  Error payload has code, not traceback.
+  request_id present on health or pipeline status.
+Commit message: "feat: API safety surface — no side-effect GET, stable error codes, request_id"
+
+PHASE 2+ — only after owner approval
 Security baseline, persistence unification, removal of silent synthetic
 fallback from production paths, async jobs, real features, forecast
 benchmarks, labor/inventory/waste engines, AI gateway.
