@@ -212,7 +212,22 @@ Tests:
   Calling get_last_run without tenant keys does not return another tenant.
 Commit message: "fix: one persistence module — single tenant-scoped path"
 
-PHASE 6+ — only after owner approval
+PHASE 6 — API TENANT CONTRACT
+Allowed files:
+  backend/restaurant_ai_platform/api_serving.py
+Work:
+  POST /pipeline/run and GET /pipeline/last-run must not invent
+  restaurant_001/location_001 when the caller omitted tenant keys.
+  Missing tenant keys return PERSISTENCE_MISSING_TENANT_KEYS or a dedicated
+  API code and do not execute the pipeline.
+  Remove GET execute examples from /pipeline/status.
+Tests:
+  POST /pipeline/run with empty JSON does not run the pipeline.
+  GET /pipeline/last-run without tenant keys does not return another tenant's run.
+  /pipeline/status has no execute=1 GET example.
+Commit message: "fix: API tenant contract — no invented default tenant"
+
+PHASE 7+ — only after owner approval
 Security baseline, async jobs, real features, forecast benchmarks,
 labor/inventory/waste engines, AI gateway.
 Each later phase must be written into this file before the agent starts it.
