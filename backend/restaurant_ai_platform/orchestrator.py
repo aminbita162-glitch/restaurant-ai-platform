@@ -40,6 +40,74 @@ def get_last_run() -> Optional[Dict[str, Any]]:
         return _LAST_RUN
 
 
+# ---------------------------------------------------------------------------
+# Async job store — in-process only, no external queue required.
+# ---------------------------------------------------------------------------
+
+_JOB_STORE_LOCK = threading.Lock()
+_JOB_STORE: Dict[str, Dict[str, Any]] = {}
+
+
+def _job_store_set(job_id: str, record: Dict[str, Any]) -> None:
+    with _JOB_STORE_LOCK:
+        _JOB_STORE[job_id] = record
+
+
+def get_job(job_id: str) -> Optional[Dict[str, Any]]:
+    """Return the job record for job_id, or None if not found."""
+    with _JOB_STORE_LOCK:
+        return _JOB_STORE.get(job_id)
+
+
+def enqueue_job(options: Dict[str, Any]) -> str:
+    """Enqueue a pipeline run as a background thread.
+
+    Returns a job_id immediately (202 pattern). The pipeline runs in a daemon
+    thread; the caller must not block on its completion inside the request.
+    The job record is retrievable via get_job(job_id).
+    """
+    job_id = f"job_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+    record: Dict[str, Any] = {
+        "job_id": job_id,
+        "status": "queued",
+        "queued_at": _utc_ts(),
+        "started_at": None,
+        "ended_at": None,
+        "restaurant_id": options.get("restaurant_id", ""),
+        "location_id": options.get("location_id", ""),
+    }
+    _job_store_set(job_id, record)
+
+    def _worker() -> None:
+        started = _utc_ts()
+        _job_store_set(job_id, {**_JOB_STORE.get(job_id, record), "status": "running", "started_at": started})
+        try:
+            result = run_pipeline(options)
+            ended = _utc_ts()
+            _job_store_set(job_id, {
+                **_JOB_STORE.get(job_id, {}),
+                "status": "done",
+                "started_at": started,
+                "ended_at": ended,
+                "result": result,
+            })
+        except Exception as e:
+            ended = _utc_ts()
+            _job_store_set(job_id, {
+                **_JOB_STORE.get(job_id, {}),
+                "status": "error",
+                "started_at": started,
+                "ended_at": ended,
+                "error": f"{type(e).__name__}: {e}",
+            })
+
+    t = threading.Thread(target=_worker, daemon=True, name=f"pipeline-job-{job_id}")
+    t.start()
+
+    return job_id
+
+
 def _utc_ts() -> str:
     return datetime.utcnow().isoformat()
 

@@ -402,9 +402,9 @@ try:
     def pipeline_run_post() -> Any:
         from . import orchestrator
 
-        started = time.time()
         request_id = _new_request_id()
 
+        # Auth must pass before any work is done.
         auth_err = _check_auth(request_id)
         if auth_err is not None:
             return auth_err
@@ -424,34 +424,25 @@ try:
                 )
 
             options = _collect_options_from_json(payload)
-            result = _run_pipeline(orchestrator, options)
+            # Enqueue the pipeline as a background job — do not run inside the request.
+            job_id = orchestrator.enqueue_job(options)
 
-            duration_ms = int((time.time() - started) * 1000)
-            run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{request_id[:8]}"
-
-            stored_status = "ok"
-            if isinstance(result, dict) and isinstance(result.get("status"), str):
-                stored_status = str(result["status"])
-
-            response_payload = {
-                "run_id": run_id,
-                "status": stored_status,
-                "duration_ms": duration_ms,
-                "restaurant_id": tenant["restaurant_id"],
-                "location_id": tenant["location_id"],
-                "requested_payload": payload,
-                "orchestrator_options_used": options,
-                "result": result,
-            }
-
-            _persist_save({**response_payload, "request_id": request_id})
-            return _response_ok(response_payload, request_id=request_id)
+            return _response_ok(
+                {
+                    "job_id": job_id,
+                    "status": "queued",
+                    "restaurant_id": tenant["restaurant_id"],
+                    "location_id": tenant["location_id"],
+                    "message": "Pipeline job queued. Use job_id to poll for status.",
+                },
+                202,
+                request_id=request_id,
+            )
 
         except Exception as e:
             _log(f"pipeline_run_post failed: {type(e).__name__}: {e}")
-            _persist_save({"request_id": request_id, "status": "error"})
             return _response_error(
-                "Pipeline execution failed",
+                "Failed to enqueue pipeline job",
                 500,
                 code="PIPELINE_ERROR",
                 request_id=request_id,
