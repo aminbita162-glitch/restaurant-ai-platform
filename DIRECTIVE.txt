@@ -152,9 +152,20 @@ Tests:
   request_id present on health or pipeline status.
 Commit message: "feat: API safety surface — no side-effect GET, stable error codes, request_id"
 
-PHASE 2+ — only after owner approval
-Security baseline, persistence unification, removal of silent synthetic
-fallback from production paths, async jobs, real features, forecast
+PHASE 2 — PRODUCTION DATA PATH
+Allowed files:
+  backend/restaurant_ai_platform/data_ingestion.py
+Work:
+  Production path must not silently fall back to synthetic sales data.
+  If the real input is missing or invalid, return a stable error code and stop.
+  Demo/synthetic use must be explicit, never implicit.
+Tests:
+  Missing CSV does not produce unlabeled synthetic sales.
+  Error code is stable and public.
+Commit message: "fix: production data path — no silent synthetic fallback"
+
+PHASE 3+ — only after owner approval
+Security baseline, persistence unification, async jobs, real features, forecast
 benchmarks, labor/inventory/waste engines, AI gateway.
 Each later phase must be written into this file before the agent starts it.
 
