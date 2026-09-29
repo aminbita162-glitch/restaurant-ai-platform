@@ -244,8 +244,21 @@ Tests:
   GET /health remains 200 without a key.
 Commit message: "feat: API auth gate — X-Api-Key required on protected routes"
 
-PHASE 8+ — only after owner approval
-Security baseline, async jobs, real features, forecast benchmarks,
+PHASE 8 — REAL FEATURES ONLY
+Allowed files:
+  backend/restaurant_ai_platform/feature_engineering.py
+Work:
+  Features must be computed from actual sales rows in context.
+  If sales is missing, empty, or not a list of numeric daily totals,
+  return status=error and a stable error code. Do not invent feature values.
+  Do not write placeholder or simulated feature fields.
+Tests:
+  Empty sales returns a stable error code and no invented features.
+  Valid sales rows produce numeric features derived from those rows.
+Commit message: "fix: real features only — no invented or placeholder values"
+
+PHASE 9+ — only after owner approval
+Security baseline, async jobs, forecast benchmarks,
 labor/inventory/waste engines, AI gateway.
 Each later phase must be written into this file before the agent starts it.
 
