@@ -198,9 +198,23 @@ Tests:
   model_registry does not load sales from an unmatched tenant run.
 Commit message: "fix: tenant-scoped last run — no cross-tenant data bleed"
 
-PHASE 5+ — only after owner approval
-Security baseline, persistence unification, async jobs, real features, forecast
-benchmarks, labor/inventory/waste engines, AI gateway.
+PHASE 5 — ONE PERSISTENCE MODULE
+Allowed files:
+  backend/restaurant_ai_platform/persistence.py
+  backend/restaurant_ai_platform/core/persistence.py
+  backend/restaurant_ai_platform/api_serving.py
+Work:
+  Runtime must use a single persistence implementation for save_run and
+  get_last_run. Remove the second conflicting last-run path.
+  API last-run must use the same tenant-scoped function as model_registry.
+Tests:
+  api_serving and model_registry read the same tenant row after one save.
+  Calling get_last_run without tenant keys does not return another tenant.
+Commit message: "fix: one persistence module — single tenant-scoped path"
+
+PHASE 6+ — only after owner approval
+Security baseline, async jobs, real features, forecast benchmarks,
+labor/inventory/waste engines, AI gateway.
 Each later phase must be written into this file before the agent starts it.
 
 
