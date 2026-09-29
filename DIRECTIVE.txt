@@ -227,7 +227,24 @@ Tests:
   /pipeline/status has no execute=1 GET example.
 Commit message: "fix: API tenant contract — no invented default tenant"
 
-PHASE 7+ — only after owner approval
+PHASE 7 — API AUTH GATE
+Allowed files:
+  backend/restaurant_ai_platform/api_serving.py
+Work:
+  GET /health stays public.
+  POST /pipeline/run and GET /pipeline/last-run require header X-Api-Key.
+  Compare the header to env RESTAURANT_AI_API_KEY.
+  If the env var is empty, do not run the pipeline. Return 503 AUTH_NOT_CONFIGURED.
+  If the header is missing or wrong, return 401 AUTH_UNAUTHORIZED.
+  Do not log the key.
+Tests:
+  POST /pipeline/run without X-Api-Key does not run the pipeline.
+  Wrong key returns 401.
+  Empty env returns 503 and does not run the pipeline.
+  GET /health remains 200 without a key.
+Commit message: "feat: API auth gate — X-Api-Key required on protected routes"
+
+PHASE 8+ — only after owner approval
 Security baseline, async jobs, real features, forecast benchmarks,
 labor/inventory/waste engines, AI gateway.
 Each later phase must be written into this file before the agent starts it.
