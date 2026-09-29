@@ -164,7 +164,24 @@ Tests:
   Error code is stable and public.
 Commit message: "fix: production data path — no silent synthetic fallback"
 
-PHASE 3+ — only after owner approval
+PHASE 3 — FAIL CLOSED INGESTION
+Allowed files:
+  backend/restaurant_ai_platform/data_ingestion.py
+  backend/restaurant_ai_platform/orchestrator.py
+Work:
+  Default tenant restaurant_001/location_001 must not auto-load upload_sales.csv
+  as a production source. Sample CSV is allowed only when demo=True.
+  If ingestion returns status=error, the orchestrator must stop the pipeline
+  and surface the error_code.
+  Successful ingestion must not attach simulated inventory or attendance labels.
+Tests:
+  Without demo=True, missing tenant CSV returns DATA_INGESTION_FILE_NOT_FOUND
+  even for restaurant_001.
+  demo=True is the only path that may use sample/demo data.
+  Orchestrator does not continue after ingestion status=error.
+Commit message: "fix: fail-closed ingestion — no default CSV, orchestrator stops on error"
+
+PHASE 4+ — only after owner approval
 Security baseline, persistence unification, async jobs, real features, forecast
 benchmarks, labor/inventory/waste engines, AI gateway.
 Each later phase must be written into this file before the agent starts it.
