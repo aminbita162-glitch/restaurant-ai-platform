@@ -18,11 +18,16 @@ def _log(message: str) -> None:
     print(f"[{_utc_ts()}] {message}")
 
 
-def _response_ok(data: Dict[str, Any], status_code: int = 200) -> Any:
+def _new_request_id() -> str:
+    return uuid.uuid4().hex
+
+
+def _response_ok(data: Dict[str, Any], status_code: int = 200, *, request_id: Optional[str] = None) -> Any:
     from flask import jsonify  # type: ignore
 
     payload = {
         "ok": True,
+        "request_id": request_id or _new_request_id(),
         "timestamp": _utc_ts(),
         **data,
     }
@@ -33,17 +38,20 @@ def _response_error(
     message: str,
     status_code: int = 500,
     *,
-    details: Optional[Dict[str, Any]] = None,
+    code: str = "INTERNAL_ERROR",
+    request_id: Optional[str] = None,
 ) -> Any:
     from flask import jsonify  # type: ignore
 
     payload: Dict[str, Any] = {
         "ok": False,
-        "error": {"message": message},
+        "request_id": request_id or _new_request_id(),
+        "error": {
+            "code": code,
+            "message": message,
+        },
         "timestamp": _utc_ts(),
     }
-    if details:
-        payload["error"]["details"] = details
     return jsonify(payload), status_code
 
 
@@ -224,16 +232,19 @@ try:
     @bp.get("/health")
     @bp.get("/api/v1/health")
     def health() -> Any:
+        rid = _new_request_id()
         return _response_ok(
             {
                 "service": "restaurant-ai-platform",
                 "status": "ok",
-            }
+            },
+            request_id=rid,
         )
 
     @bp.get("/pipeline/status")
     @bp.get("/api/v1/pipeline/status")
     def pipeline_status() -> Any:
+        rid = _new_request_id()
         return _response_ok(
             {
                 "service": "restaurant-ai-platform",
@@ -287,7 +298,8 @@ try:
                         "non_strict": "/api/v1/pipeline/run?execute=1&confirm=yes&strict=0",
                     },
                 },
-            }
+            },
+            request_id=rid,
         )
 
     @bp.get("/pipeline/last-run")
@@ -328,71 +340,23 @@ try:
     @bp.get("/pipeline/run")
     @bp.get("/api/v1/pipeline/run")
     def pipeline_run_browser() -> Any:
-        execute = (request.args.get("execute") or "").strip().lower()
-        confirm = (request.args.get("confirm") or "").strip().lower()
-
-        if execute in {"1", "true", "yes"} and confirm == "yes":
-            from . import orchestrator
-
-            options = _collect_options_from_query(request.args)
-
-            started = time.time()
-            request_id = uuid.uuid4().hex
-            try:
-                result = _run_pipeline(orchestrator, options)
-                duration_ms = int((time.time() - started) * 1000)
-                run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{request_id[:8]}"
-
-                stored_status = "ok"
-                if isinstance(result, dict) and isinstance(result.get("status"), str):
-                    stored_status = str(result["status"])
-
-                response_payload = {
-                    "request_id": request_id,
-                    "run_id": run_id,
-                    "status": stored_status,
-                    "duration_ms": duration_ms,
-                    "restaurant_id": options.get("restaurant_id", DEFAULT_RESTAURANT_ID),
-                    "location_id": options.get("location_id", DEFAULT_LOCATION_ID),
-                    "requested_payload": {"_via": "browser_get", **options},
-                    "orchestrator_options_used": options,
-                    "result": result,
-                }
-
-                _persist_save(response_payload)
-                return _response_ok(response_payload)
-            except Exception as e:
-                _log(f"pipeline_run_browser failed: {type(e).__name__}: {e}")
-                err_payload = {
-                    "request_id": request_id,
-                    "status": "error",
-                    "restaurant_id": options.get("restaurant_id", DEFAULT_RESTAURANT_ID),
-                    "location_id": options.get("location_id", DEFAULT_LOCATION_ID),
-                    "requested_payload": {"_via": "browser_get", **options},
-                    "error_type": type(e).__name__,
-                    "error": str(e),
-                }
-                _persist_save(err_payload)
-                return _response_error("Pipeline execution failed", 500, details=err_payload)
-
+        # GET must never trigger pipeline execution (no side-effects on safe methods).
+        rid = _new_request_id()
         return _response_ok(
             {
                 "service": "restaurant-ai-platform",
-                "message": (
-                    "Use POST to /api/v1/pipeline/run for normal clients. "
-                    "For Safari browser testing, call GET with ?execute=1&confirm=yes."
-                ),
-                "how_to_test_in_browser": {
-                    "safe_check": "/api/v1/pipeline/status",
-                    "execute_pipeline": "/api/v1/pipeline/run?execute=1&confirm=yes",
-                    "execute_pipeline_for_tenant": "/api/v1/pipeline/run?execute=1&confirm=yes&restaurant_id=restaurant_001&location_id=location_001",
-                    "dry_run_example": "/api/v1/pipeline/run?execute=1&confirm=yes&dry_run=1",
-                    "last_run": "/api/v1/pipeline/last-run",
-                    "last_run_for_tenant": "/api/v1/pipeline/last-run?restaurant_id=restaurant_001&location_id=location_001",
-                    "steps_example": "/api/v1/pipeline/run?execute=1&confirm=yes&steps=1_data_ingestion,2_data_warehouse",
-                    "range_example": "/api/v1/pipeline/run?execute=1&confirm=yes&start_at=3_feature_engineering&stop_after=5_ml_prediction",
+                "message": "Use POST /api/v1/pipeline/run to execute the pipeline.",
+                "how_to_execute": {
+                    "method": "POST",
+                    "url": "/api/v1/pipeline/run",
+                    "content_type": "application/json",
+                    "body_example": {
+                        "restaurant_id": "restaurant_001",
+                        "location_id": "location_001",
+                    },
                 },
-            }
+            },
+            request_id=rid,
         )
 
     @bp.post("/pipeline/run")
@@ -401,7 +365,7 @@ try:
         from . import orchestrator
 
         started = time.time()
-        request_id = uuid.uuid4().hex
+        request_id = _new_request_id()
 
         try:
             payload = request.get_json(silent=True) or {}
@@ -419,7 +383,6 @@ try:
                 stored_status = str(result["status"])
 
             response_payload = {
-                "request_id": request_id,
                 "run_id": run_id,
                 "status": stored_status,
                 "duration_ms": duration_ms,
@@ -430,19 +393,18 @@ try:
                 "result": result,
             }
 
-            _persist_save(response_payload)
-            return _response_ok(response_payload)
+            _persist_save({**response_payload, "request_id": request_id})
+            return _response_ok(response_payload, request_id=request_id)
 
         except Exception as e:
             _log(f"pipeline_run_post failed: {type(e).__name__}: {e}")
-            err_payload = {
-                "request_id": request_id,
-                "status": "error",
-                "error_type": type(e).__name__,
-                "error": str(e),
-            }
-            _persist_save(err_payload)
-            return _response_error("Pipeline execution failed", 500, details=err_payload)
+            _persist_save({"request_id": request_id, "status": "error"})
+            return _response_error(
+                "Pipeline execution failed",
+                500,
+                code="PIPELINE_ERROR",
+                request_id=request_id,
+            )
 
 except Exception as e:
     _log(f"Flask blueprint not available: {type(e).__name__}: {e}")
