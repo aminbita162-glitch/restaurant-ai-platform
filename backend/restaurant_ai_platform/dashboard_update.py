@@ -1,6 +1,13 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+# Stable public error codes for inventory failures.
+INVENTORY_ERROR_MISSING_SALES = "INVENTORY_MISSING_SALES"
+INVENTORY_ERROR_INVALID_SALES = "INVENTORY_INVALID_SALES"
+
+# Fixed ratio constants — these are rules, not MRP.
+INGREDIENTS_PER_SALES_UNIT = 0.45
+MEALS_PER_SALES_UNIT = 1 / 25
 
 DEFAULT_RESTAURANT_ID = "restaurant_001"
 DEFAULT_LOCATION_ID = "location_001"
@@ -10,11 +17,34 @@ def _utc_ts() -> str:
     return datetime.utcnow().isoformat()
 
 
-def _estimate_inventory(predicted_sales: float) -> Dict[str, float]:
+def _inventory_for_sales(predicted_sales: float) -> Dict[str, float]:
+    """Fixed-ratio rule: ingredients and meals derived from predicted sales.
+
+    This is a rule — it is NOT MRP or inventory optimisation.
+    """
     return {
-        "ingredients_needed": round(predicted_sales * 0.45, 2),
-        "estimated_meals": round(predicted_sales / 25, 2),
+        "ingredients_needed": round(predicted_sales * INGREDIENTS_PER_SALES_UNIT, 2),
+        "estimated_meals": round(predicted_sales * MEALS_PER_SALES_UNIT, 2),
     }
+
+
+def _build_inventory_plan(
+    sales: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Build a per-day inventory estimate from actual sales rows using fixed ratios."""
+    plan: List[Dict[str, Any]] = []
+    for i, row in enumerate(sales):
+        daily = float(row.get("daily_sales_total", 0))
+        inv = _inventory_for_sales(daily)
+        plan.append(
+            {
+                "day_index": i + 1,
+                "daily_sales_total": daily,
+                "ingredients_needed": inv["ingredients_needed"],
+                "estimated_meals": inv["estimated_meals"],
+            }
+        )
+    return plan
 
 
 def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -81,26 +111,48 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                 "reason": f"gpt_insight_failed:{type(e).__name__}:{e}",
             }
 
-    restaurant_id = prediction_data.get("restaurant_id", DEFAULT_RESTAURANT_ID)
-    location_id = prediction_data.get("location_id", DEFAULT_LOCATION_ID)
+    restaurant_id = (
+        context.get("restaurant_id")
+        or prediction_data.get("restaurant_id")
+        or DEFAULT_RESTAURANT_ID
+    )
+    location_id = (
+        context.get("location_id")
+        or prediction_data.get("location_id")
+        or DEFAULT_LOCATION_ID
+    )
+
+    # Inventory is built from actual sales rows in context, not from forecast.
+    # Guard: sales must be present and valid.
+    sales = context.get("sales")
+    if not sales or not isinstance(sales, list):
+        code = INVENTORY_ERROR_MISSING_SALES
+        print(f"[{_utc_ts()}] dashboard_update inventory status=error code={code}")
+        return {
+            "status": "error",
+            "error_code": code,
+            "restaurant_id": restaurant_id,
+            "location_id": location_id,
+            "timestamp": _utc_ts(),
+        }
+
+    # Validate each sales row has a numeric daily_sales_total.
+    for row in sales:
+        if not isinstance(row, dict) or not isinstance(row.get("daily_sales_total"), (int, float)):
+            code = INVENTORY_ERROR_INVALID_SALES
+            print(f"[{_utc_ts()}] dashboard_update inventory status=error code={code}")
+            return {
+                "status": "error",
+                "error_code": code,
+                "restaurant_id": restaurant_id,
+                "location_id": location_id,
+                "timestamp": _utc_ts(),
+            }
+
+    inventory_plan = _build_inventory_plan(sales)
 
     forecast = prediction_data.get("forecast", [])
     staffing_plan = optimization_data.get("staffing_plan", [])
-
-    inventory_plan: List[Dict[str, Any]] = []
-
-    for i, day in enumerate(forecast):
-        predicted = float(day.get("predicted_sales", 0))
-        inv = _estimate_inventory(predicted)
-
-        inventory_plan.append(
-            {
-                "day_index": i + 1,
-                "predicted_sales": predicted,
-                "ingredients_needed": inv["ingredients_needed"],
-                "estimated_meals": inv["estimated_meals"],
-            }
-        )
 
     insight_json = gpt_data.get("insight_json", {}) if isinstance(gpt_data, dict) else {}
     risk_level = None
@@ -120,6 +172,12 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "forecast": forecast,
         "staffing_plan": staffing_plan,
         "inventory_plan": inventory_plan,
+        # method and method_description describe the inventory rule honestly.
+        "inventory_method": "rule",
+        "inventory_method_description": (
+            f"fixed ratios: {INGREDIENTS_PER_SALES_UNIT} ingredients per sales unit, "
+            f"{round(MEALS_PER_SALES_UNIT, 4)} meals per sales unit"
+        ),
         "gpt_insight_status": gpt_data.get("gpt_insight_status"),
         "insight_json": insight_json,
         "risk_level": risk_level,
