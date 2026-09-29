@@ -78,24 +78,20 @@ def _parse_csv(value: Optional[str]) -> Optional[List[str]]:
 
 
 def _collect_tenant_from_query(args: Any) -> Dict[str, str]:
-    restaurant_id = (args.get("restaurant_id") or "").strip() or DEFAULT_RESTAURANT_ID
-    location_id = (args.get("location_id") or "").strip() or DEFAULT_LOCATION_ID
+    """Return tenant keys exactly as supplied. Empty string means absent — never invent a default."""
     return {
-        "restaurant_id": restaurant_id,
-        "location_id": location_id,
+        "restaurant_id": (args.get("restaurant_id") or "").strip(),
+        "location_id": (args.get("location_id") or "").strip(),
     }
 
 
 def _collect_tenant_from_json(payload: Dict[str, Any]) -> Dict[str, str]:
+    """Return tenant keys exactly as supplied. Empty string means absent — never invent a default."""
     restaurant_id = payload.get("restaurant_id")
     location_id = payload.get("location_id")
-
-    restaurant_id_str = str(restaurant_id).strip() if restaurant_id is not None else ""
-    location_id_str = str(location_id).strip() if location_id is not None else ""
-
     return {
-        "restaurant_id": restaurant_id_str or DEFAULT_RESTAURANT_ID,
-        "location_id": location_id_str or DEFAULT_LOCATION_ID,
+        "restaurant_id": str(restaurant_id).strip() if restaurant_id is not None else "",
+        "location_id": str(location_id).strip() if location_id is not None else "",
     }
 
 
@@ -278,22 +274,10 @@ try:
                             "/pipeline/run (POST)",
                             "/api/v1/pipeline/run (POST)",
                         ],
-                        "pipeline_run_browser": [
-                            "/pipeline/run?execute=1&confirm=yes (GET)",
-                            "/api/v1/pipeline/run?execute=1&confirm=yes (GET)",
-                        ],
                     },
                     "examples": {
-                        "run_all": "/api/v1/pipeline/run?execute=1&confirm=yes",
-                        "run_for_tenant": "/api/v1/pipeline/run?execute=1&confirm=yes&restaurant_id=restaurant_001&location_id=location_001",
-                        "dry_run": "/api/v1/pipeline/run?execute=1&confirm=yes&dry_run=1",
-                        "last_run": "/api/v1/pipeline/last-run",
-                        "last_run_for_tenant": "/api/v1/pipeline/last-run?restaurant_id=restaurant_001&location_id=location_001",
-                        "subset": "/api/v1/pipeline/run?execute=1&confirm=yes&steps=1_data_ingestion,2_data_warehouse",
-                        "exclude": "/api/v1/pipeline/run?execute=1&confirm=yes&exclude=7_api_serving",
-                        "range": "/api/v1/pipeline/run?execute=1&confirm=yes&start_at=3_feature_engineering&stop_after=5_ml_prediction",
-                        "stop_on_error": "/api/v1/pipeline/run?execute=1&confirm=yes&stop_on_error=1",
-                        "non_strict": "/api/v1/pipeline/run?execute=1&confirm=yes&strict=0",
+                        "post_run": "POST /api/v1/pipeline/run  body: {\"restaurant_id\":\"...\",\"location_id\":\"...\"}",
+                        "last_run": "/api/v1/pipeline/last-run?restaurant_id=...&location_id=...",
                     },
                 },
             },
@@ -307,11 +291,30 @@ try:
     @bp.get("/pipeline/lastrun")
     @bp.get("/api/v1/pipeline/lastrun")
     def pipeline_last_run() -> Any:
+        rid = _new_request_id()
         tenant = _collect_tenant_from_query(request.args)
+
+        if not tenant["restaurant_id"] or not tenant["location_id"]:
+            return _response_error(
+                "restaurant_id and location_id are required",
+                400,
+                code="MISSING_TENANT_KEYS",
+                request_id=rid,
+            )
+
         last_run = _persist_get_last(
             restaurant_id=tenant["restaurant_id"],
             location_id=tenant["location_id"],
         )
+
+        # If persistence returned an error dict (e.g. PERSISTENCE_MISSING_TENANT_KEYS), surface it.
+        if isinstance(last_run, dict) and last_run.get("error_code"):
+            return _response_error(
+                last_run.get("message", "Persistence error"),
+                400,
+                code=str(last_run["error_code"]),
+                request_id=rid,
+            )
 
         if last_run is None:
             return _response_ok(
@@ -322,7 +325,8 @@ try:
                     "has_last_run": False,
                     "last_run": None,
                     "message": "No pipeline run has been stored yet for this tenant. Run the pipeline first.",
-                }
+                },
+                request_id=rid,
             )
 
         return _response_ok(
@@ -332,7 +336,8 @@ try:
                 "location_id": tenant["location_id"],
                 "has_last_run": True,
                 "last_run": last_run,
-            }
+            },
+            request_id=rid,
         )
 
     @bp.get("/pipeline/run")
@@ -370,6 +375,15 @@ try:
             if not isinstance(payload, dict):
                 payload = {"_raw": payload}
 
+            tenant = _collect_tenant_from_json(payload)
+            if not tenant["restaurant_id"] or not tenant["location_id"]:
+                return _response_error(
+                    "restaurant_id and location_id are required to run the pipeline",
+                    400,
+                    code="MISSING_TENANT_KEYS",
+                    request_id=request_id,
+                )
+
             options = _collect_options_from_json(payload)
             result = _run_pipeline(orchestrator, options)
 
@@ -384,8 +398,8 @@ try:
                 "run_id": run_id,
                 "status": stored_status,
                 "duration_ms": duration_ms,
-                "restaurant_id": options.get("restaurant_id", DEFAULT_RESTAURANT_ID),
-                "location_id": options.get("location_id", DEFAULT_LOCATION_ID),
+                "restaurant_id": tenant["restaurant_id"],
+                "location_id": tenant["location_id"],
                 "requested_payload": payload,
                 "orchestrator_options_used": options,
                 "result": result,
