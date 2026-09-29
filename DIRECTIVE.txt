@@ -273,9 +273,24 @@ Tests:
   No output field claims model training when only an average was used.
 Commit message: "fix: honest forecast — heuristic labelled heuristic, error on thin data"
 
-PHASE 10+ — only after owner approval
+PHASE 10 — HONEST LABOR RULE
+Allowed files:
+  backend/restaurant_ai_platform/optimization.py
+Work:
+  Staffing output must name the exact rule used.
+  Do not label a simple sales-per-staff ratio as an optimizer.
+  If required sales or forecast input is missing, return status=error and a
+  stable error code. Do not invent headcount.
+  Payload field method must be rule, never optimizer or ml.
+Tests:
+  Missing sales/forecast returns an error and no staff list.
+  A ratio rule sets method=rule.
+  No output field claims constraint optimization.
+Commit message: "fix: honest labor rule — ratio labelled rule, error on missing input"
+
+PHASE 11+ — only after owner approval
 Security baseline, async jobs, forecast benchmarks,
-labor/inventory/waste engines, AI gateway.
+inventory/waste engines, AI gateway.
 Each later phase must be written into this file before the agent starts it.
 
 
