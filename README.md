@@ -216,7 +216,7 @@ The current version supports:
 
 ## Limitations
 
-This project is currently a strong Phase 1 production-style baseline, but it still has important limitations.
+This project is currently a Phase 1 backend pipeline baseline with important limitations.
 
 ### 1. Simplified model logic
 The forecasting logic is still relatively simple and not yet a fully production-grade ML forecasting engine.
@@ -278,14 +278,46 @@ The key design principle is simple:
 
 ## Baseline Status
 
-Current system status:
+Current system status: **Phase 1 backend pipeline baseline.**
 
-**Production Baseline Stable — Phase 1**
-
-The system has successfully passed:
+The system has been verified against:
 
 - health endpoint validation
 - pipeline status validation
 - tenant-aware run validation
 - full golden pipeline execution
 - last-run persistence validation
+
+Note: this is a development baseline. It is not a production-hardened, enterprise-authenticated, or multi-tenant-isolated deployment.
+
+---
+
+## Releases
+
+No GitHub Release has been published for this repository yet.
+
+---
+
+## Engineering Plan
+
+The items below are planned future work written in future tense. None of these capabilities exist in the current codebase.
+
+- The forecasting engine will be replaced with a statistically validated model and benchmarked against held-out data.
+- The staffing module will be extended from the current sales/600 heuristic to a constraint-based shift optimizer.
+- Inventory planning will move from fixed-ratio estimates to a demand-driven calculation.
+- Food waste tracking will be implemented as a measured output, not just a named field.
+- A production authentication and tenant isolation layer will be added before any multi-tenant deployment.
+- A structured error catalog with trace IDs and tenant context will replace raw exception propagation.
+- A versioned artifact registry will be introduced so engineered shapes are reused rather than regenerated.
+- Live POS, ERP, and inventory system connectors will replace the current CSV-based ingestion.
+- A customer-facing dashboard application will be built on top of the existing payload API.
+- Full observability — monitoring, alerting, distributed tracing, and metrics — will be added in a later phase.
+
+---
+
+## Author
+
+Amin Azimi — AI Architect
+Amin Azimi and System Development
+Business Challenge
+Azimi Innovation Lab
