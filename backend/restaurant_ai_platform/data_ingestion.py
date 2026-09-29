@@ -24,6 +24,17 @@ def _safe_id(value: str) -> str:
 
 
 def _resolve_data_file_path(restaurant_id: str, location_id: str) -> str:
+    """Return the most specific CSV path that exists for this tenant.
+
+    Resolution order (most specific first):
+      1. <restaurant_id>__<location_id>__sales.csv
+      2. <restaurant_id>__sales.csv
+      3. upload_sales.csv  — only when restaurant_id is the default demo tenant
+
+    For any non-default tenant, if no tenant-specific file exists, return the
+    tenant-specific path so the caller receives FILE_NOT_FOUND rather than
+    silently loading another tenant's data.
+    """
     restaurant_part = _safe_id(restaurant_id or DEFAULT_RESTAURANT_ID)
     location_part = _safe_id(location_id or DEFAULT_LOCATION_ID)
 
@@ -37,15 +48,25 @@ def _resolve_data_file_path(restaurant_id: str, location_id: str) -> str:
         f"{restaurant_part}__sales.csv",
     )
 
-    default_path = os.path.join(BASE_DATA_DIR, DEFAULT_DATA_FILE)
-
     if os.path.exists(tenant_specific):
         return tenant_specific
 
     if os.path.exists(restaurant_specific):
         return restaurant_specific
 
-    return default_path
+    # Only fall back to the shared default file when the caller is using the
+    # explicit default demo tenant — never for an unknown tenant.
+    is_default_tenant = (
+        restaurant_id == DEFAULT_RESTAURANT_ID
+        and location_id == DEFAULT_LOCATION_ID
+    )
+    if is_default_tenant:
+        default_path = os.path.join(BASE_DATA_DIR, DEFAULT_DATA_FILE)
+        if os.path.exists(default_path):
+            return default_path
+
+    # No matching file — return tenant-specific path; caller will get FILE_NOT_FOUND.
+    return tenant_specific
 
 
 def _load_sales_from_csv(path: str, restaurant_id: str, location_id: str) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
@@ -73,8 +94,14 @@ def _load_sales_from_csv(path: str, restaurant_id: str, location_id: str) -> Tup
 
         return rows, None
 
-    except Exception as e:
-        return None, str(e)
+    except Exception:
+        return None, "INPUT_READ_ERROR"
+
+
+# Stable public error codes for data ingestion failures.
+DATA_INGESTION_ERROR_FILE_NOT_FOUND = "DATA_INGESTION_FILE_NOT_FOUND"
+DATA_INGESTION_ERROR_READ_FAILED = "DATA_INGESTION_READ_FAILED"
+DATA_INGESTION_ERROR_EMPTY = "DATA_INGESTION_EMPTY"
 
 
 def run(context: Optional[Dict[str, Any]] = None) -> dict:
@@ -83,36 +110,73 @@ def run(context: Optional[Dict[str, Any]] = None) -> dict:
     restaurant_id = str(context.get("restaurant_id") or DEFAULT_RESTAURANT_ID)
     location_id = str(context.get("location_id") or DEFAULT_LOCATION_ID)
 
-    print(f"[{_utc_ts()}] step=1_data_ingestion status=started restaurant_id={restaurant_id} location_id={location_id}")
+    # demo=True must be set explicitly by the caller to use synthetic data.
+    demo = bool(context.get("demo", False))
+
+    print(f"[{_utc_ts()}] step=1_data_ingestion status=started restaurant_id={restaurant_id} location_id={location_id} demo={demo}")
+
+    if demo:
+        # Explicit demo mode: caller opted in — never implicit.
+        print(f"[{_utc_ts()}] step=1_data_ingestion status=completed source=demo")
+        return {
+            "restaurant_id": restaurant_id,
+            "location_id": location_id,
+            "sales_source": "demo",
+            "sales_rows_loaded": 0,
+            "sales": [],
+            "inventory": "demo_inventory_data",
+            "attendance": "demo_attendance_data",
+            "timestamp": _utc_ts(),
+        }
 
     data_file_path = _resolve_data_file_path(restaurant_id, location_id)
     sales_data, error = _load_sales_from_csv(data_file_path, restaurant_id, location_id)
 
-    if sales_data:
-        result = {
+    if error == "file_not_found":
+        code = DATA_INGESTION_ERROR_FILE_NOT_FOUND
+        print(f"[{_utc_ts()}] step=1_data_ingestion status=error code={code} path={os.path.basename(data_file_path)}")
+        return {
+            "status": "error",
+            "error_code": code,
             "restaurant_id": restaurant_id,
             "location_id": location_id,
-            "sales_source": "csv_file",
             "sales_file_path": os.path.basename(data_file_path),
-            "sales_rows_loaded": len(sales_data),
-            "sales": sales_data,
-            "inventory": "simulated_inventory_data",
-            "attendance": "simulated_attendance_data",
-            "timestamp": _utc_ts(),
-        }
-    else:
-        result = {
-            "restaurant_id": restaurant_id,
-            "location_id": location_id,
-            "sales_source": "simulated_fallback",
-            "sales_file_path": os.path.basename(data_file_path),
-            "error": error,
-            "sales": "simulated_sales_data",
-            "inventory": "simulated_inventory_data",
-            "attendance": "simulated_attendance_data",
             "timestamp": _utc_ts(),
         }
 
-    print(f"[{_utc_ts()}] step=1_data_ingestion status=completed restaurant_id={restaurant_id} location_id={location_id}")
+    if error:
+        code = DATA_INGESTION_ERROR_READ_FAILED
+        print(f"[{_utc_ts()}] step=1_data_ingestion status=error code={code}")
+        return {
+            "status": "error",
+            "error_code": code,
+            "restaurant_id": restaurant_id,
+            "location_id": location_id,
+            "sales_file_path": os.path.basename(data_file_path),
+            "timestamp": _utc_ts(),
+        }
 
-    return result
+    if not sales_data:
+        code = DATA_INGESTION_ERROR_EMPTY
+        print(f"[{_utc_ts()}] step=1_data_ingestion status=error code={code}")
+        return {
+            "status": "error",
+            "error_code": code,
+            "restaurant_id": restaurant_id,
+            "location_id": location_id,
+            "sales_file_path": os.path.basename(data_file_path),
+            "timestamp": _utc_ts(),
+        }
+
+    print(f"[{_utc_ts()}] step=1_data_ingestion status=completed source=csv_file rows={len(sales_data)}")
+    return {
+        "restaurant_id": restaurant_id,
+        "location_id": location_id,
+        "sales_source": "csv_file",
+        "sales_file_path": os.path.basename(data_file_path),
+        "sales_rows_loaded": len(sales_data),
+        "sales": sales_data,
+        "inventory": "simulated_inventory_data",
+        "attendance": "simulated_attendance_data",
+        "timestamp": _utc_ts(),
+    }
