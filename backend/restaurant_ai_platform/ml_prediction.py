@@ -3,125 +3,118 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+# Stable public error codes for forecast failures.
+FORECAST_ERROR_MISSING_SALES = "FORECAST_MISSING_SALES"
+FORECAST_ERROR_INSUFFICIENT_DATA = "FORECAST_INSUFFICIENT_DATA"
+FORECAST_ERROR_INVALID_SALES = "FORECAST_INVALID_SALES"
 
-DEFAULT_RESTAURANT_ID = "restaurant_001"
-DEFAULT_LOCATION_ID = "location_001"
+# Minimum number of valid daily totals required to produce a forecast.
+MIN_SALES_ROWS = 7
 
 
 def _utc_ts() -> str:
     return datetime.utcnow().isoformat()
 
 
-def _extract_restaurant_context() -> tuple[str, str]:
-    try:
-        from . import model_registry
+def _extract_daily_totals(sales: Any) -> Optional[List[float]]:
+    """Return a list of float daily_sales_total values, or None if data is unusable."""
+    if not isinstance(sales, list) or not sales:
+        return None
 
-        result = model_registry._get_latest_pipeline_result()
-        if not isinstance(result, dict):
-            return DEFAULT_RESTAURANT_ID, DEFAULT_LOCATION_ID
+    totals: List[float] = []
+    for row in sales:
+        if not isinstance(row, dict):
+            return None
+        v = row.get("daily_sales_total")
+        if not isinstance(v, (int, float)):
+            return None
+        totals.append(float(v))
 
-        return model_registry._extract_restaurant_context_from_result(result)
-    except Exception:
-        return DEFAULT_RESTAURANT_ID, DEFAULT_LOCATION_ID
+    return totals if totals else None
 
 
-def run() -> Dict[str, Any]:
+def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Produce a 7-day heuristic sales forecast from actual sales rows in context.
+
+    Method: simple average of all supplied daily totals, compounded at a fixed
+    2 % daily growth factor. This is a heuristic — it is NOT a trained ML model.
+    The output field `method` is always set to `heuristic` to reflect this.
     """
-    Uses the registered demo model from model_registry.py
-    and produces a simple 7-day forecast based on avg_daily_sales.
-    """
+    ctx = context or {}
+    restaurant_id = ctx.get("restaurant_id")
+    location_id = ctx.get("location_id")
+    sales = ctx.get("sales")
     horizon = 7
 
-    try:
-        from . import model_registry
-    except Exception as e:
+    # Guard: sales must be present.
+    if sales is None or (isinstance(sales, list) and len(sales) == 0):
+        code = FORECAST_ERROR_MISSING_SALES
+        print(f"[{_utc_ts()}] ml_prediction status=error code={code}")
         return {
-            "data": {
-                "ml_prediction_status": "error",
-                "reason": f"import_model_registry_failed:{type(e).__name__}:{e}",
-                "timestamp": _utc_ts(),
-            },
-            "errors": [],
-            "warnings": [],
-            "metrics": {},
+            "status": "error",
+            "error_code": code,
+            "restaurant_id": restaurant_id,
+            "location_id": location_id,
+            "timestamp": _utc_ts(),
         }
 
-    restaurant_id, location_id = _extract_restaurant_context()
+    # Guard: sales must be valid numeric rows.
+    totals = _extract_daily_totals(sales)
+    if totals is None:
+        code = FORECAST_ERROR_INVALID_SALES
+        print(f"[{_utc_ts()}] ml_prediction status=error code={code}")
+        return {
+            "status": "error",
+            "error_code": code,
+            "restaurant_id": restaurant_id,
+            "location_id": location_id,
+            "timestamp": _utc_ts(),
+        }
 
-    try:
-        model = model_registry.load_model(
-            restaurant_id=restaurant_id,
-            location_id=location_id,
+    # Guard: require at least MIN_SALES_ROWS rows to avoid thin-data forecasts.
+    if len(totals) < MIN_SALES_ROWS:
+        code = FORECAST_ERROR_INSUFFICIENT_DATA
+        print(
+            f"[{_utc_ts()}] ml_prediction status=error code={code}"
+            f" rows={len(totals)} required={MIN_SALES_ROWS}"
         )
-    except FileNotFoundError:
         return {
-            "data": {
-                "ml_prediction_status": "error",
-                "restaurant_id": restaurant_id,
-                "location_id": location_id,
-                "reason": "model_not_found",
-                "timestamp": _utc_ts(),
-            },
-            "errors": [],
-            "warnings": [],
-            "metrics": {},
-        }
-    except Exception as e:
-        return {
-            "data": {
-                "ml_prediction_status": "error",
-                "restaurant_id": restaurant_id,
-                "location_id": location_id,
-                "reason": f"model_load_failed:{type(e).__name__}:{e}",
-                "timestamp": _utc_ts(),
-            },
-            "errors": [],
-            "warnings": [],
-            "metrics": {},
+            "status": "error",
+            "error_code": code,
+            "restaurant_id": restaurant_id,
+            "location_id": location_id,
+            "sales_rows_provided": len(totals),
+            "sales_rows_required": MIN_SALES_ROWS,
+            "timestamp": _utc_ts(),
         }
 
-    try:
-        base = float(model["avg_daily_sales"])
-        model_name = str(model.get("model_name", "unknown_model"))
-        model_version = str(model.get("version", "unknown_version"))
-        trained_at = str(model.get("trained_at", "unknown_time"))
-    except Exception as e:
-        return {
-            "data": {
-                "ml_prediction_status": "error",
-                "restaurant_id": restaurant_id,
-                "location_id": location_id,
-                "reason": f"invalid_model_format:{type(e).__name__}:{e}",
-                "timestamp": _utc_ts(),
-            },
-            "errors": [],
-            "warnings": [],
-            "metrics": {},
-        }
-
+    # Heuristic: average of all supplied daily totals.
+    avg = sum(totals) / len(totals)
     growth = 0.02
-    forecast: List[Dict[str, float]] = []
-    current = base
 
+    forecast: List[Dict[str, float]] = []
+    current = avg
     for _ in range(horizon):
         current = round(current * (1.0 + growth), 2)
         forecast.append({"predicted_sales": current})
 
+    print(
+        f"[{_utc_ts()}] ml_prediction status=ok"
+        f" method=heuristic rows={len(totals)} avg={round(avg,2)}"
+    )
+
     return {
-        "data": {
-            "ml_prediction_status": "ok",
-            "restaurant_id": restaurant_id,
-            "location_id": location_id,
-            "model_used": {
-                "model_name": model_name,
-                "model_version": model_version,
-                "trained_at": trained_at,
-            },
-            "horizon": horizon,
-            "forecast": forecast,
-            "timestamp": _utc_ts(),
-        },
-        "errors": [],
-        "warnings": [],
-        "metrics": {},
+        "ml_prediction_status": "ok",
+        "restaurant_id": restaurant_id,
+        "location_id": location_id,
+        # method is always heuristic — this is an average, not a trained model.
+        "method": "heuristic",
+        "method_description": (
+            "average of historical daily sales compounded at 2% daily growth"
+        ),
+        "sales_rows_used": len(totals),
+        "avg_daily_sales_used": round(avg, 4),
+        "horizon": horizon,
+        "forecast": forecast,
+        "timestamp": _utc_ts(),
     }
