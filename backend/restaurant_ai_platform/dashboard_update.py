@@ -82,7 +82,6 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     context = context or {}
 
     try:
-        from . import ml_prediction
         from . import optimization
         from . import gpt_insight
     except Exception as e:
@@ -96,16 +95,10 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if isinstance(context.get("5_ml_prediction"), dict):
         prediction_data = context.get("5_ml_prediction", {})
 
-    if not prediction_data:
-        try:
-            prediction_result = ml_prediction.run()
-            prediction_data = prediction_result.get("data", {})
-        except Exception as e:
-            return {
-                "dashboard_update_status": "error",
-                "reason": f"prediction_failed:{type(e).__name__}:{e}",
-                "timestamp": _utc_ts(),
-            }
+    # C4: do NOT import or rerun ml_prediction here. The forecast is read
+    # from the context artifact produced by the upstream 5_ml_prediction
+    # step. If the artifact is absent, prediction_data stays empty and
+    # downstream consumers handle the missing forecast gracefully.
 
     optimization_data: Dict[str, Any] = {}
     if isinstance(context.get("6_optimization"), dict):
@@ -113,7 +106,7 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
     if not optimization_data:
         try:
-            optimization_result = optimization.run()
+            optimization_result = optimization.run(context)
             optimization_data = optimization_result
         except Exception as e:
             return {

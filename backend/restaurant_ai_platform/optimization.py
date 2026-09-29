@@ -45,28 +45,19 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "timestamp": _utc_ts(),
         }
 
-    # Obtain forecast from ml_prediction, passing context so it has sales rows.
-    try:
-        from . import ml_prediction
-        forecast_result = ml_prediction.run(context=ctx)
-    except Exception as e:
-        code = LABOR_ERROR_FORECAST_FAILED
-        print(f"[{_utc_ts()}] optimization status=error code={code} exc={type(e).__name__}")
-        return {
-            "status": "error",
-            "error_code": code,
-            "restaurant_id": restaurant_id,
-            "location_id": location_id,
-            "timestamp": _utc_ts(),
-        }
+    # C4: read the forecast already produced on the context artifact.
+    # Do NOT import or rerun ml_prediction here — that would create a
+    # duplicate forecast artifact. The upstream 5_ml_prediction step is
+    # responsible for producing the forecast; we only consume it.
+    forecast_result = ctx.get("5_ml_prediction")
 
-    # Guard: forecast step must have succeeded.
+    # Guard: forecast artifact must be present and successful.
     if not isinstance(forecast_result, dict) or forecast_result.get("status") == "error":
         code = LABOR_ERROR_FORECAST_FAILED
         upstream_code = (
-            forecast_result.get("error_code", "unknown")
+            forecast_result.get("error_code", "missing_forecast_artifact")
             if isinstance(forecast_result, dict)
-            else "unknown"
+            else "missing_forecast_artifact"
         )
         print(f"[{_utc_ts()}] optimization status=error code={code} upstream={upstream_code}")
         return {
