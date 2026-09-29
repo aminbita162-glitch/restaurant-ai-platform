@@ -181,7 +181,24 @@ Tests:
   Orchestrator does not continue after ingestion status=error.
 Commit message: "fix: fail-closed ingestion — no default CSV, orchestrator stops on error"
 
-PHASE 4+ — only after owner approval
+PHASE 4 — TENANT-SCOPED LAST RUN
+Allowed files:
+  backend/restaurant_ai_platform/persistence.py
+  backend/restaurant_ai_platform/core/persistence.py
+  backend/restaurant_ai_platform/model_registry.py
+Work:
+  get_last_run must never return a global latest run across tenants.
+  Every read and write of pipeline run data must be scoped by
+  restaurant_id and location_id.
+  model_registry must not train from another tenant's last run.
+  If tenant keys are missing, return a stable error code and do not
+  invent a default tenant run.
+Tests:
+  Saving tenant A then reading tenant B does not return tenant A.
+  model_registry does not load sales from an unmatched tenant run.
+Commit message: "fix: tenant-scoped last run — no cross-tenant data bleed"
+
+PHASE 5+ — only after owner approval
 Security baseline, persistence unification, async jobs, real features, forecast
 benchmarks, labor/inventory/waste engines, AI gateway.
 Each later phase must be written into this file before the agent starts it.
