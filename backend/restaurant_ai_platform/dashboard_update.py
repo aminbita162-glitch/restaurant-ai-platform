@@ -1,13 +1,17 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-# Stable public error codes for inventory failures.
+# Stable public error codes for inventory and waste failures.
 INVENTORY_ERROR_MISSING_SALES = "INVENTORY_MISSING_SALES"
 INVENTORY_ERROR_INVALID_SALES = "INVENTORY_INVALID_SALES"
 
-# Fixed ratio constants — these are rules, not MRP.
+# Fixed ratio constants — these are rules, not MRP or ML.
 INGREDIENTS_PER_SALES_UNIT = 0.45
 MEALS_PER_SALES_UNIT = 1 / 25
+
+# Waste ratio constant — rule, not a trained model.
+# Estimated food waste = 8 % of daily sales value.
+WASTE_RATIO = 0.08
 
 DEFAULT_RESTAURANT_ID = "restaurant_001"
 DEFAULT_LOCATION_ID = "location_001"
@@ -26,6 +30,31 @@ def _inventory_for_sales(predicted_sales: float) -> Dict[str, float]:
         "ingredients_needed": round(predicted_sales * INGREDIENTS_PER_SALES_UNIT, 2),
         "estimated_meals": round(predicted_sales * MEALS_PER_SALES_UNIT, 2),
     }
+
+
+def _waste_for_sales(predicted_sales: float) -> float:
+    """Fixed-ratio rule: estimated food waste derived from daily sales.
+
+    This is a rule — it is NOT a waste model or ML prediction.
+    """
+    return round(predicted_sales * WASTE_RATIO, 2)
+
+
+def _build_waste_plan(
+    sales: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Build a per-day waste estimate from actual sales rows using a fixed ratio."""
+    plan: List[Dict[str, Any]] = []
+    for i, row in enumerate(sales):
+        daily = float(row.get("daily_sales_total", 0))
+        plan.append(
+            {
+                "day_index": i + 1,
+                "daily_sales_total": daily,
+                "estimated_waste": _waste_for_sales(daily),
+            }
+        )
+    return plan
 
 
 def _build_inventory_plan(
@@ -150,6 +179,7 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             }
 
     inventory_plan = _build_inventory_plan(sales)
+    waste_plan = _build_waste_plan(sales)
 
     forecast = prediction_data.get("forecast", [])
     staffing_plan = optimization_data.get("staffing_plan", [])
@@ -177,6 +207,12 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "inventory_method_description": (
             f"fixed ratios: {INGREDIENTS_PER_SALES_UNIT} ingredients per sales unit, "
             f"{round(MEALS_PER_SALES_UNIT, 4)} meals per sales unit"
+        ),
+        "waste_plan": waste_plan,
+        # waste_method describes the waste rule honestly — not ML, not a waste model.
+        "waste_method": "rule",
+        "waste_method_description": (
+            f"fixed ratio: {WASTE_RATIO} estimated waste per sales unit"
         ),
         "gpt_insight_status": gpt_data.get("gpt_insight_status"),
         "insight_json": insight_json,
