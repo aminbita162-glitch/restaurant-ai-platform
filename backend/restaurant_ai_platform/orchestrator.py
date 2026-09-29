@@ -406,8 +406,22 @@ def run_pipeline(
                 context["restaurant_id"] = step_data.get("restaurant_id")
                 context["location_id"] = step_data.get("location_id")
                 context["sales"] = step_data.get("sales")
-                context["inventory"] = step_data.get("inventory")
-                context["attendance"] = step_data.get("attendance")
+
+                # Ingestion failure: data_ingestion.run() returns {"status":"error","error_code":...}.
+                # _coerce_step_output flattens that into step_data, so check error_code directly.
+                if step_data.get("error_code"):
+                    error_code = str(step_data["error_code"])
+                    _log_event(
+                        "pipeline_stopped_ingestion_error",
+                        run_id=run_id,
+                        extra={"error_code": error_code},
+                    )
+                    base["stopped_early"] = True
+                    base["stop_reason"] = "ingestion_error"
+                    base["stop_step"] = step_name
+                    base["ingestion_error_code"] = error_code
+                    base["status"] = "error"
+                    break
 
             if step_name == "2_data_warehouse" and isinstance(step_data, dict):
                 context["sales_records"] = step_data.get("sales_records")

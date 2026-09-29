@@ -29,11 +29,10 @@ def _resolve_data_file_path(restaurant_id: str, location_id: str) -> str:
     Resolution order (most specific first):
       1. <restaurant_id>__<location_id>__sales.csv
       2. <restaurant_id>__sales.csv
-      3. upload_sales.csv  — only when restaurant_id is the default demo tenant
 
-    For any non-default tenant, if no tenant-specific file exists, return the
-    tenant-specific path so the caller receives FILE_NOT_FOUND rather than
-    silently loading another tenant's data.
+    The shared upload_sales.csv is never used as a production source.
+    If no tenant-specific file exists the tenant-specific path is returned
+    so the caller receives FILE_NOT_FOUND.
     """
     restaurant_part = _safe_id(restaurant_id or DEFAULT_RESTAURANT_ID)
     location_part = _safe_id(location_id or DEFAULT_LOCATION_ID)
@@ -53,17 +52,6 @@ def _resolve_data_file_path(restaurant_id: str, location_id: str) -> str:
 
     if os.path.exists(restaurant_specific):
         return restaurant_specific
-
-    # Only fall back to the shared default file when the caller is using the
-    # explicit default demo tenant — never for an unknown tenant.
-    is_default_tenant = (
-        restaurant_id == DEFAULT_RESTAURANT_ID
-        and location_id == DEFAULT_LOCATION_ID
-    )
-    if is_default_tenant:
-        default_path = os.path.join(BASE_DATA_DIR, DEFAULT_DATA_FILE)
-        if os.path.exists(default_path):
-            return default_path
 
     # No matching file — return tenant-specific path; caller will get FILE_NOT_FOUND.
     return tenant_specific
@@ -176,7 +164,5 @@ def run(context: Optional[Dict[str, Any]] = None) -> dict:
         "sales_file_path": os.path.basename(data_file_path),
         "sales_rows_loaded": len(sales_data),
         "sales": sales_data,
-        "inventory": "simulated_inventory_data",
-        "attendance": "simulated_attendance_data",
         "timestamp": _utc_ts(),
     }
