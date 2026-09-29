@@ -288,9 +288,24 @@ Tests:
   No output field claims constraint optimization.
 Commit message: "fix: honest labor rule — ratio labelled rule, error on missing input"
 
-PHASE 11+ — only after owner approval
+PHASE 11 — HONEST INVENTORY RULE
+Allowed files:
+  backend/restaurant_ai_platform/dashboard_update.py
+Work:
+  Inventory payload must name the exact rule used.
+  Do not label fixed ratios as MRP or inventory optimization.
+  If required sales input is missing or invalid, return status=error and a
+  stable error code. Do not invent stock quantities.
+  Payload field method must be rule, never mrp or optimizer.
+Tests:
+  Missing sales returns an error and no inventory quantities.
+  A ratio rule sets method=rule.
+  No output field claims MRP.
+Commit message: "fix: honest inventory rule — fixed ratios labelled rule, error on missing input"
+
+PHASE 12+ — only after owner approval
 Security baseline, async jobs, forecast benchmarks,
-inventory/waste engines, AI gateway.
+waste engines, AI gateway.
 Each later phase must be written into this file before the agent starts it.
 
 
