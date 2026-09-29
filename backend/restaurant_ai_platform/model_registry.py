@@ -43,18 +43,31 @@ def _load_persistence_module():
         return persistence
 
 
-def _get_latest_pipeline_result() -> Optional[Dict[str, Any]]:
-    """
+def _get_latest_pipeline_result(
+    restaurant_id: str,
+    location_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Return the last pipeline result for the given tenant only.
+
     Persistence may store either:
       - the orchestrator result dict directly, OR
       - an API wrapper that contains {"result": <orchestrator_result>, ...}
+    Never calls get_last_run() without tenant keys.
     """
     persistence = _load_persistence_module()
 
-    last_run = None
-    if hasattr(persistence, "get_last_run"):
-        last_run = persistence.get_last_run()  # type: ignore[attr-defined]
+    if not hasattr(persistence, "get_last_run"):
+        return None
+
+    last_run = persistence.get_last_run(  # type: ignore[attr-defined]
+        restaurant_id=restaurant_id,
+        location_id=location_id,
+    )
     if not isinstance(last_run, dict):
+        return None
+
+    # If get_last_run returned an error (missing tenant keys), propagate None.
+    if last_run.get("error_code"):
         return None
 
     if isinstance(last_run.get("result"), dict):
@@ -204,20 +217,43 @@ def predict(
     return prediction
 
 
-def run() -> Dict[str, Any]:
+def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Pipeline step entrypoint.
+
+    Trains (or refreshes) the model by reading sales from the latest stored
+    pipeline run for THIS tenant only. Tenant keys must be present in context;
+    if they are absent the step raises rather than loading another tenant's run.
     """
-    Pipeline step entrypoint.
-    Trains (or refreshes) the demo model by reading sales from the latest stored pipeline run.
-    """
-    result = _get_latest_pipeline_result()
+    ctx = context or {}
+    restaurant_id = str(ctx.get("restaurant_id") or "").strip()
+    location_id = str(ctx.get("location_id") or "").strip()
+
+    if not restaurant_id or not location_id:
+        raise ValueError(
+            "MODEL_REGISTRY_MISSING_TENANT: restaurant_id and location_id "
+            "are required in context to load the correct pipeline run."
+        )
+
+    result = _get_latest_pipeline_result(restaurant_id, location_id)
     if result is None:
-        raise ValueError("No stored pipeline run found. Run 1_data_ingestion first.")
+        raise ValueError(
+            f"No stored pipeline run found for tenant "
+            f"{restaurant_id}/{location_id}. Run 1_data_ingestion first."
+        )
+
+    # Verify the retrieved result belongs to this tenant before extracting sales.
+    result_rid, result_lid = _extract_restaurant_context_from_result(result)
+    if result_rid != restaurant_id or result_lid != location_id:
+        raise ValueError(
+            f"MODEL_REGISTRY_TENANT_MISMATCH: stored run belongs to "
+            f"{result_rid}/{result_lid}, not {restaurant_id}/{location_id}."
+        )
 
     sales = _extract_sales_from_result(result)
     if not sales:
-        raise ValueError("Model registry requires non-empty sales data from 1_data_ingestion")
-
-    restaurant_id, location_id = _extract_restaurant_context_from_result(result)
+        raise ValueError(
+            "Model registry requires non-empty sales data from 1_data_ingestion"
+        )
 
     model = train_and_save_model(
         {"sales": sales},

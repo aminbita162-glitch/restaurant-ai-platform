@@ -114,33 +114,38 @@ def save_run(payload: Dict[str, Any]):
     conn.close()
 
 
+# Stable public error code returned when tenant keys are required but absent.
+PERSISTENCE_ERROR_MISSING_TENANT = "PERSISTENCE_MISSING_TENANT_KEYS"
+
+
 def get_last_run(
     restaurant_id: Optional[str] = None,
     location_id: Optional[str] = None,
-):
+) -> Optional[Dict[str, Any]]:
+    """Return the latest run for the given tenant.
+
+    Both restaurant_id and location_id are required. If either is absent,
+    return an error dict rather than a global cross-tenant result.
+    """
+    if not restaurant_id or not location_id:
+        return {
+            "error_code": PERSISTENCE_ERROR_MISSING_TENANT,
+            "message": "restaurant_id and location_id are required to read last run",
+        }
+
     conn = _get_connection()
     cursor = conn.cursor()
 
-    if restaurant_id and location_id:
-        cursor.execute(
-            """
-            SELECT run_id, request_id, restaurant_id, location_id, status, duration_ms, payload_json, result_json, created_at
-            FROM pipeline_runs
-            WHERE restaurant_id = ? AND location_id = ?
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (restaurant_id, location_id),
-        )
-    else:
-        cursor.execute(
-            """
-            SELECT run_id, request_id, restaurant_id, location_id, status, duration_ms, payload_json, result_json, created_at
-            FROM pipeline_runs
-            ORDER BY id DESC
-            LIMIT 1
-            """
-        )
+    cursor.execute(
+        """
+        SELECT run_id, request_id, restaurant_id, location_id, status, duration_ms, payload_json, result_json, created_at
+        FROM pipeline_runs
+        WHERE restaurant_id = ? AND location_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (restaurant_id, location_id),
+    )
 
     row = cursor.fetchone()
     conn.close()
