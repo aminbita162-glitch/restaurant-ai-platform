@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, Optional, List
+import os
 import time
 import uuid
 
@@ -180,6 +181,37 @@ def _run_pipeline(orchestrator: Any, options: Dict[str, Any]) -> Dict[str, Any]:
             return orchestrator.run_pipeline()  # type: ignore[misc]
 
 
+def _check_auth(request_id: str) -> Optional[Any]:
+    """Return an error response if the request is not authorised, else None.
+
+    Rules (PHASE 7):
+    - If RESTAURANT_AI_API_KEY env var is empty, return 503 AUTH_NOT_CONFIGURED.
+    - If X-Api-Key header is missing or does not match, return 401 AUTH_UNAUTHORIZED.
+    - The key value is never logged.
+    """
+    from flask import request as flask_request  # type: ignore
+
+    expected = os.environ.get("RESTAURANT_AI_API_KEY", "").strip()
+    if not expected:
+        return _response_error(
+            "API key authentication is not configured on this server",
+            503,
+            code="AUTH_NOT_CONFIGURED",
+            request_id=request_id,
+        )
+
+    provided = (flask_request.headers.get("X-Api-Key") or "").strip()
+    if not provided or provided != expected:
+        return _response_error(
+            "Missing or invalid X-Api-Key header",
+            401,
+            code="AUTH_UNAUTHORIZED",
+            request_id=request_id,
+        )
+
+    return None  # authorised
+
+
 _PERSIST_AVAILABLE = False
 try:
     from .core import persistence  # type: ignore
@@ -292,6 +324,9 @@ try:
     @bp.get("/api/v1/pipeline/lastrun")
     def pipeline_last_run() -> Any:
         rid = _new_request_id()
+        auth_err = _check_auth(rid)
+        if auth_err is not None:
+            return auth_err
         tenant = _collect_tenant_from_query(request.args)
 
         if not tenant["restaurant_id"] or not tenant["location_id"]:
@@ -369,6 +404,10 @@ try:
 
         started = time.time()
         request_id = _new_request_id()
+
+        auth_err = _check_auth(request_id)
+        if auth_err is not None:
+            return auth_err
 
         try:
             payload = request.get_json(silent=True) or {}
