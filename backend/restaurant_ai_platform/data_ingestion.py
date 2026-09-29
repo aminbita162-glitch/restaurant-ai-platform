@@ -71,12 +71,21 @@ def _load_sales_from_csv(path: str, restaurant_id: str, location_id: str) -> Tup
                 row_restaurant_id = str(row.get("restaurant_id") or restaurant_id or DEFAULT_RESTAURANT_ID)
                 row_location_id = str(row.get("location_id") or location_id or DEFAULT_LOCATION_ID)
 
+                # Reject rows whose daily_sales_total is not a valid number.
+                raw_total = row.get("daily_sales_total")
+                if raw_total is None or str(raw_total).strip() == "":
+                    return None, "invalid_row"
+                try:
+                    total = float(raw_total)
+                except (ValueError, TypeError):
+                    return None, "invalid_row"
+
                 rows.append(
                     {
                         "restaurant_id": row_restaurant_id,
                         "location_id": row_location_id,
                         "date": row.get("date"),
-                        "daily_sales_total": float(row.get("daily_sales_total", 0)),
+                        "daily_sales_total": total,
                     }
                 )
 
@@ -90,6 +99,7 @@ def _load_sales_from_csv(path: str, restaurant_id: str, location_id: str) -> Tup
 DATA_INGESTION_ERROR_FILE_NOT_FOUND = "DATA_INGESTION_FILE_NOT_FOUND"
 DATA_INGESTION_ERROR_READ_FAILED = "DATA_INGESTION_READ_FAILED"
 DATA_INGESTION_ERROR_EMPTY = "DATA_INGESTION_EMPTY"
+DATA_INGESTION_ERROR_INVALID_ROW = "DATA_INGESTION_INVALID_ROW"
 
 
 def run(context: Optional[Dict[str, Any]] = None) -> dict:
@@ -98,15 +108,18 @@ def run(context: Optional[Dict[str, Any]] = None) -> dict:
     restaurant_id = str(context.get("restaurant_id") or DEFAULT_RESTAURANT_ID)
     location_id = str(context.get("location_id") or DEFAULT_LOCATION_ID)
 
-    # demo=True must be set explicitly by the caller to use synthetic data.
+    # demo=True must be set explicitly by the caller to use DEMO data.
+    # It is the ONLY path to sample data. Never implicit.
     demo = bool(context.get("demo", False))
 
     print(f"[{_utc_ts()}] step=1_data_ingestion status=started restaurant_id={restaurant_id} location_id={location_id} demo={demo}")
 
     if demo:
         # Explicit demo mode: caller opted in — never implicit.
-        print(f"[{_utc_ts()}] step=1_data_ingestion status=completed source=demo")
+        print(f"[{_utc_ts()}] step=1_data_ingestion status=completed source_type=DEMO")
         return {
+            "status": "ok",
+            "source_type": "DEMO",
             "restaurant_id": restaurant_id,
             "location_id": location_id,
             "sales_source": "demo",
@@ -123,6 +136,18 @@ def run(context: Optional[Dict[str, Any]] = None) -> dict:
     if error == "file_not_found":
         code = DATA_INGESTION_ERROR_FILE_NOT_FOUND
         print(f"[{_utc_ts()}] step=1_data_ingestion status=error code={code} path={os.path.basename(data_file_path)}")
+        return {
+            "status": "error",
+            "error_code": code,
+            "restaurant_id": restaurant_id,
+            "location_id": location_id,
+            "sales_file_path": os.path.basename(data_file_path),
+            "timestamp": _utc_ts(),
+        }
+
+    if error == "invalid_row":
+        code = DATA_INGESTION_ERROR_INVALID_ROW
+        print(f"[{_utc_ts()}] step=1_data_ingestion status=error code={code}")
         return {
             "status": "error",
             "error_code": code,
@@ -156,8 +181,10 @@ def run(context: Optional[Dict[str, Any]] = None) -> dict:
             "timestamp": _utc_ts(),
         }
 
-    print(f"[{_utc_ts()}] step=1_data_ingestion status=completed source=csv_file rows={len(sales_data)}")
+    print(f"[{_utc_ts()}] step=1_data_ingestion status=completed source_type=REAL rows={len(sales_data)}")
     return {
+        "status": "ok",
+        "source_type": "REAL",
         "restaurant_id": restaurant_id,
         "location_id": location_id,
         "sales_source": "csv_file",
