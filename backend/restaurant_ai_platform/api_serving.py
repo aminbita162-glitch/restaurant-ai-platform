@@ -210,13 +210,11 @@ def _persist_get_last(
     if not _PERSIST_AVAILABLE:
         return None
     try:
-        return persistence.get_last_run(restaurant_id=restaurant_id, location_id=location_id)  # type: ignore[attr-defined]
-    except TypeError:
-        try:
-            return persistence.get_last_run()  # type: ignore[attr-defined]
-        except Exception as e:
-            _log(f"persistence_read_failed: {type(e).__name__}: {e}")
-            return None
+        # Always call with explicit tenant keys — no fallback to a keyless call.
+        return persistence.get_last_run(  # type: ignore[attr-defined]
+            restaurant_id=restaurant_id,
+            location_id=location_id,
+        )
     except Exception as e:
         _log(f"persistence_read_failed: {type(e).__name__}: {e}")
         return None
