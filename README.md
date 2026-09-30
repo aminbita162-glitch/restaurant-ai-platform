@@ -188,53 +188,48 @@ Tenant-aware example:
 - `POST /pipeline/run`
 - `POST /api/v1/pipeline/run`
 
-Browser execution example:
-
-- `/api/v1/pipeline/run?execute=1&confirm=yes`
-
-Tenant-aware browser execution example:
-
-- `/api/v1/pipeline/run?execute=1&confirm=yes&restaurant_id=restaurant_001&location_id=location_001`
+> **Note:** `GET /pipeline/run` does NOT execute the pipeline. It returns instructions to use POST. The pipeline must never be triggered by a safe (GET) request.
 
 ---
 
 ## Current Capabilities
 
-The current version supports:
-
-- end-to-end pipeline execution
-- tenant-aware execution using `restaurant_id` and `location_id`
-- 7-day sales forecasting
-- GPT-generated structured business insights
-- staffing recommendations
-- inventory planning payload generation
-- persistence of last successful pipeline runs
-- dashboard-ready structured output
-- browser-based execution for manual testing
+| Capability | Status | Notes |
+|---|---|---|
+| Data ingestion (CSV, tenant-scoped) | Implemented | Rejects invalid rows with stable error codes. DEMO only with `demo=true`. |
+| Pipeline orchestrator (step selection, dry-run) | Implemented | Async job enqueue via `POST /pipeline/run` (202 + job_id). `GET /pipeline/run` does not execute. |
+| Postgres persistence (optional) | Implemented | When `DATABASE_URL` is set; SQLite local-only otherwise. Tenant-scoped. |
+| Day-of-week sales forecast | Implemented | `method=dow_heuristic`; 7-day horizon from weekday buckets. Thin history (<7 rows) errors. |
+| Backtest quality gate | Implemented | Hold-out MAPE; `labor_recommendation_allowed=false` when MAPE > 50% or insufficient history. |
+| Block shift planner | Implemented | 2-hour blocks with `start`, `end`, `role`, `n`. `method=rule` — not a constraint solver. |
+| BOM inventory | Implemented | Requires explicit recipe/BOM structure; errors if missing. `inventory_method=bom_rule`. No MRP. |
+| Waste numeric contract | Implemented | Numeric from inputs; errors on missing/invalid. `waste_method=rule` + `weekly_waste_target`. |
+| Tenant API gate | Implemented | `X-Api-Key` required. Tenant keys must not be defaulted. Per-tenant rate limit on `POST /pipeline/run`. |
+| AI output schema gate | Implemented | Invalid model JSON → `degraded` with `method=rule`; valid → `method=openai`. Raw text never passes as actions. |
+| Structured run logs | Implemented | Every log line includes `run_id`, `step`, `duration_ms`. |
+| Manager decision payload | Implemented | Compact payload with `approval=proposed`, `actions[]`, forecast/staffing/inventory/waste summary. |
+| GPT insight generation | Experimental | Quality depends on external model. Schema-validated; degraded fallback when invalid. |
+| Forecast accuracy | Experimental | Heuristic (day-of-week average + 2% growth). Not a trained ML model. |
+| Staffing optimization | Experimental | Fixed ratio (1 per 600 sales). Not a constraint solver. |
+| Real-data connectors (POS/ERP) | Planned | CSV-only ingestion today. |
+| Full authentication / IdP | Planned | `X-Api-Key` only; not token-bound tenant isolation. |
+| Frontend dashboard | Planned | Backend payload only; no UI. |
+| Production observability | Planned | Structured logs exist; no alerting/tracing/metrics dashboards. |
+| Multi-tenant isolation at scale | Planned | In-process state; not million-tenant isolated cells. |
 
 ---
 
 ## Limitations
 
-This project is currently a Phase 1 backend pipeline baseline with important limitations.
+This project is a development baseline. It is not a production-hardened, enterprise-authenticated, or multi-tenant-isolated deployment.
 
-### 1. Simplified model logic
-The forecasting logic is still relatively simple and not yet a fully production-grade ML forecasting engine.
-
-### 2. Limited real-world data integration
-The current ingestion layer supports CSV-style inputs and controlled examples, but is not yet integrated with live POS, ERP, or inventory systems.
-
-### 3. No full authentication / authorization layer
-API access control, tenant security isolation, and production auth are not yet fully implemented.
-
-### 4. Limited observability
-The platform has execution logging and persistence, but not yet full production monitoring, alerting, tracing, or metrics dashboards.
-
-### 5. No full frontend product yet
-The backend prepares dashboard payloads, but a full customer-facing dashboard application is still pending.
-
-### 6. GPT output depends on external model behavior
-Although GPT output is structured, the quality of business insight still depends on prompt design and model consistency.
+- Forecasting is heuristic, not a trained ML model.
+- Staffing is a fixed-ratio rule, not a constraint optimizer.
+- Inventory requires an explicit recipe/BOM; no MRP or demand-driven optimization.
+- Waste is a fixed-ratio estimate, not a measured event store.
+- API auth is `X-Api-Key` only; no full IdP or token-bound tenant isolation.
+- No customer-facing frontend.
+- No live POS/ERP connectors.
 
 ---
 
@@ -278,14 +273,14 @@ The key design principle is simple:
 
 ## Baseline Status
 
-Current system status: **Phase 1 backend pipeline baseline.**
+Current system status: **Development baseline.**
 
 The system has been verified against:
 
 - health endpoint validation
 - pipeline status validation
 - tenant-aware run validation
-- full golden pipeline execution
+- fail-closed smoke tests (4 tests)
 - last-run persistence validation
 
 Note: this is a development baseline. It is not a production-hardened, enterprise-authenticated, or multi-tenant-isolated deployment.
