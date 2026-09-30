@@ -83,6 +83,9 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "timestamp": _utc_ts(),
         }
 
+    # C6: read the backtest quality gate from the forecast artifact.
+    labor_recommendation_allowed = forecast_result.get("labor_recommendation_allowed", False)
+
     # Apply the ratio rule to each forecast day.
     staffing_plan: List[Dict[str, Any]] = []
     for i, day in enumerate(forecast):
@@ -98,6 +101,7 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     print(
         f"[{_utc_ts()}] DONE optimization method=rule"
         f" days={len(staffing_plan)}"
+        f" labor_recommendation_allowed={labor_recommendation_allowed}"
     )
 
     return {
@@ -108,5 +112,7 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "method": "rule",
         "method_description": f"1 staff per {SALES_PER_STAFF} sales units (minimum 1)",
         "staffing_plan": staffing_plan,
+        # C6: expose the backtest quality gate.
+        "labor_recommendation_allowed": labor_recommendation_allowed,
         "timestamp": _utc_ts(),
     }

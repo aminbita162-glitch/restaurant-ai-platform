@@ -14,6 +14,14 @@ MIN_SALES_ROWS = 7
 # Fixed daily growth factor applied on top of the day-of-week average.
 DOW_GROWTH = 0.02
 
+# Minimum rows required to run a backtest (7 train + 7 test).
+MIN_BACKTEST_ROWS = 14
+
+# MAPE threshold above which labor recommendations are disallowed.
+# Documented quality gate: if mean absolute percentage error exceeds 50 %,
+# the forecast is not reliable enough to drive staffing decisions.
+MAPE_THRESHOLD = 0.50
+
 # Weekday names indexed by datetime.weekday() (0=Mon … 6=Sun).
 _WEEKDAY_NAMES = [
     "Monday",
@@ -119,6 +127,90 @@ def _last_date(sales: List[Dict[str, Any]]) -> Optional[datetime]:
         if dt is not None and (best is None or dt > best):
             best = dt
     return best
+
+
+def _compute_mape(actual: List[float], predicted: List[float]) -> Optional[float]:
+    """Compute mean absolute percentage error (fraction, not %).
+
+    Returns None if no valid pair exists. Skips pairs where actual is zero
+    to avoid division-by-zero. Result is a fraction: 0.25 = 25 %.
+    """
+    errors: List[float] = []
+    for a, p in zip(actual, predicted):
+        if a == 0:
+            continue
+        errors.append(abs(a - p) / abs(a))
+    if not errors:
+        return None
+    return sum(errors) / len(errors)
+
+
+def _backtest(sales: List[Dict[str, Any]], totals: List[float]) -> Dict[str, Any]:
+    """Run a simple hold-out backtest on the forecast heuristic.
+
+    Splits the most recent 7 rows as the test set and uses everything before
+    as the training set. Re-runs the day-of-week heuristic on the training set,
+    generates a 7-day forecast, and compares against the held-out actuals.
+
+    Returns a dict with mape (fraction or None), backtest_rows, and
+    labor_recommendation_allowed (bool).
+    """
+    test_size = 7
+    train_size = len(totals) - test_size
+
+    if train_size < MIN_SALES_ROWS:
+        # Not enough history to backtest — cannot certify quality.
+        return {
+            "mape": None,
+            "mape_pct": None,
+            "backtest_rows": 0,
+            "backtest_reason": "insufficient_history",
+            "labor_recommendation_allowed": False,
+        }
+
+    train_sales = sales[:train_size]
+    train_totals = totals[:train_size]
+    actual_totals = totals[train_size:]
+
+    # Build weekday averages from the training set.
+    dow_avgs = _build_dow_averages(train_sales, train_totals)
+    overall_avg = sum(train_totals) / len(train_totals) if train_totals else 0.0
+    if dow_avgs is not None:
+        base_per_day = dow_avgs
+    else:
+        base_per_day = [overall_avg] * 7
+
+    # Generate 7-day forecast from the training set's last date (or now).
+    last_dt = _last_date(train_sales)
+    if last_dt is not None:
+        start_date = last_dt + timedelta(days=1)
+    else:
+        start_date = datetime.utcnow() + timedelta(days=1)
+
+    predicted: List[float] = []
+    for i in range(min(test_size, len(actual_totals))):
+        day_date = start_date + timedelta(days=i)
+        weekday = day_date.weekday()
+        base = base_per_day[weekday]
+        grown = base * ((1.0 + DOW_GROWTH) ** (i + 1))
+        predicted.append(round(grown, 2))
+
+    # Pad predicted if actuals are shorter than expected.
+    while len(predicted) < len(actual_totals):
+        predicted.append(predicted[-1] if predicted else overall_avg)
+
+    mape = _compute_mape(actual_totals, predicted[: len(actual_totals)])
+    mape_pct = round(mape * 100, 2) if mape is not None else None
+
+    labor_allowed = mape is not None and mape <= MAPE_THRESHOLD
+
+    return {
+        "mape": round(mape, 4) if mape is not None else None,
+        "mape_pct": mape_pct,
+        "backtest_rows": len(actual_totals),
+        "backtest_reason": "ok" if mape is not None else "no_valid_pairs",
+        "labor_recommendation_allowed": labor_allowed,
+    }
 
 
 def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -230,6 +322,16 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         f" dow_method={dow_method} avg={round(overall_avg, 2)}"
     )
 
+    # C6: backtest gate — compute MAPE and decide labor_recommendation_allowed.
+    backtest_result = _backtest(sales_list, totals)
+    labor_recommendation_allowed = backtest_result["labor_recommendation_allowed"]
+
+    print(
+        f"[{_utc_ts()}] ml_prediction backtest"
+        f" mape_pct={backtest_result.get('mape_pct')}"
+        f" labor_recommendation_allowed={labor_recommendation_allowed}"
+    )
+
     return {
         "ml_prediction_status": "ok",
         "restaurant_id": restaurant_id,
@@ -242,5 +344,9 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "avg_daily_sales_used": round(overall_avg, 4),
         "horizon": horizon,
         "forecast": forecast,
+        # C6: backtest quality gate.
+        "backtest": backtest_result,
+        "labor_recommendation_allowed": labor_recommendation_allowed,
+        "mape_threshold": MAPE_THRESHOLD,
         "timestamp": _utc_ts(),
     }
