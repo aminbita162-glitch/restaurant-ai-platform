@@ -8,6 +8,19 @@ LABOR_ERROR_FORECAST_FAILED = "LABOR_FORECAST_FAILED"
 # Rule constant: one staff member per this many sales units.
 SALES_PER_STAFF = 600
 
+# Standard 2-hour operating blocks for a restaurant day.
+SHIFT_BLOCKS: List[tuple] = [
+    ("10:00", "12:00"),
+    ("12:00", "14:00"),
+    ("14:00", "16:00"),
+    ("16:00", "18:00"),
+    ("18:00", "20:00"),
+    ("20:00", "22:00"),
+]
+
+# Role assigned to each block — at least one role field is present.
+SHIFT_ROLE = "server"
+
 
 def _utc_ts() -> str:
     return datetime.utcnow().isoformat()
@@ -18,6 +31,18 @@ def _staff_for_sales(predicted_sales: float) -> int:
     if predicted_sales <= 0:
         return 1
     return max(1, int(predicted_sales / SALES_PER_STAFF))
+
+
+def _distribute_staff(total: int, num_blocks: int) -> List[int]:
+    """Distribute *total* staff across *num_blocks* blocks as evenly as possible.
+
+    No headcount is invented — the sum of the returned list equals *total*.
+    """
+    if total <= 0 or num_blocks <= 0:
+        return [0] * max(num_blocks, 0)
+    base = total // num_blocks
+    remainder = total % num_blocks
+    return [base + (1 if i < remainder else 0) for i in range(num_blocks)]
 
 
 def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -86,21 +111,33 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     # C6: read the backtest quality gate from the forecast artifact.
     labor_recommendation_allowed = forecast_result.get("labor_recommendation_allowed", False)
 
-    # Apply the ratio rule to each forecast day.
+    # Apply the ratio rule to each forecast day, then split each day's
+    # recommended staff into 2-hour blocks. No headcount is invented —
+    # the sum of n across blocks equals the daily recommendation.
+    num_blocks = len(SHIFT_BLOCKS)
     staffing_plan: List[Dict[str, Any]] = []
+
     for i, day in enumerate(forecast):
         predicted = float(day.get("predicted_sales", 0))
-        staffing_plan.append(
-            {
-                "day_index": i + 1,
-                "predicted_sales": predicted,
-                "recommended_staff": _staff_for_sales(predicted),
-            }
-        )
+        day_total = _staff_for_sales(predicted)
+        block_ns = _distribute_staff(day_total, num_blocks)
+
+        for j, (start, end) in enumerate(SHIFT_BLOCKS):
+            staffing_plan.append(
+                {
+                    "day_index": i + 1,
+                    "date": day.get("date"),
+                    "block_index": j + 1,
+                    "start": start,
+                    "end": end,
+                    "role": SHIFT_ROLE,
+                    "n": block_ns[j],
+                }
+            )
 
     print(
         f"[{_utc_ts()}] DONE optimization method=rule"
-        f" days={len(staffing_plan)}"
+        f" days={len(forecast)} blocks={len(staffing_plan)}"
         f" labor_recommendation_allowed={labor_recommendation_allowed}"
     )
 
@@ -110,7 +147,7 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "location_id": location_id,
         # method is always rule — this is a ratio, not a constraint optimizer.
         "method": "rule",
-        "method_description": f"1 staff per {SALES_PER_STAFF} sales units (minimum 1)",
+        "method_description": f"1 staff per {SALES_PER_STAFF} sales units (minimum 1), distributed across 2-hour blocks",
         "staffing_plan": staffing_plan,
         # C6: expose the backtest quality gate.
         "labor_recommendation_allowed": labor_recommendation_allowed,
