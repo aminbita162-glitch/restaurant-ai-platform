@@ -166,6 +166,90 @@ def _build_bom_inventory_plan(
     return plan
 
 
+def _build_manager_payload(
+    forecast: List[Dict[str, Any]],
+    staffing_plan: List[Dict[str, Any]],
+    inventory_plan: List[Dict[str, Any]],
+    waste_plan: List[Dict[str, Any]],
+    weekly_waste_target: Dict[str, Any],
+    actions: List[str],
+    risk_level: Optional[str],
+) -> Dict[str, Any]:
+    """Build a compact manager decision payload.
+
+    Includes:
+    - forecast summary (compact)
+    - staffing blocks (compact)
+    - inventory list (compact)
+    - waste number (total + target)
+    - actions[] as a list
+    - approval=proposed
+    """
+    # Forecast summary: one entry per day with just the essentials.
+    forecast_summary: List[Dict[str, Any]] = []
+    for day in forecast:
+        if not isinstance(day, dict):
+            continue
+        forecast_summary.append(
+            {
+                "day_index": day.get("day_index"),
+                "date": day.get("date"),
+                "weekday": day.get("weekday"),
+                "predicted_sales": day.get("predicted_sales"),
+            }
+        )
+
+    # Staffing blocks: compact — just the block essentials.
+    staffing_blocks: List[Dict[str, Any]] = []
+    for block in staffing_plan:
+        if not isinstance(block, dict):
+            continue
+        staffing_blocks.append(
+            {
+                "day_index": block.get("day_index"),
+                "start": block.get("start"),
+                "end": block.get("end"),
+                "role": block.get("role"),
+                "n": block.get("n"),
+            }
+        )
+
+    # Inventory list: compact — ingredient, unit, total_quantity.
+    inventory_list: List[Dict[str, Any]] = []
+    for item in inventory_plan:
+        if not isinstance(item, dict):
+            continue
+        inventory_list.append(
+            {
+                "recipe": item.get("recipe"),
+                "ingredient": item.get("ingredient"),
+                "unit": item.get("unit"),
+                "total_quantity": item.get("total_quantity"),
+            }
+        )
+
+    # Waste number: total estimated waste across all days + target.
+    total_waste = sum(
+        float(w.get("estimated_waste", 0))
+        for w in waste_plan
+        if isinstance(w, dict)
+    )
+
+    return {
+        "forecast_summary": forecast_summary,
+        "staffing_blocks": staffing_blocks,
+        "inventory_list": inventory_list,
+        "waste": {
+            "total_estimated_waste": round(total_waste, 2),
+            "weekly_waste_target": weekly_waste_target.get("weekly_waste_target"),
+            "target_pct": weekly_waste_target.get("target_pct"),
+        },
+        "actions": actions,
+        "risk_level": risk_level,
+        "approval": "proposed",
+    }
+
+
 def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     print(f"[{_utc_ts()}] START dashboard_update")
 
@@ -329,6 +413,16 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "insight_json": insight_json,
         "risk_level": risk_level,
         "actions": actions,
+        # C13: compact manager decision payload with approval=proposed.
+        "manager_payload": _build_manager_payload(
+            forecast=forecast,
+            staffing_plan=staffing_plan,
+            inventory_plan=inventory_plan,
+            waste_plan=waste_plan,
+            weekly_waste_target=weekly_waste_target,
+            actions=actions,
+            risk_level=risk_level,
+        ),
         "timestamp": _utc_ts(),
     }
 
