@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 import os
 import time
 import uuid
-
-
-DEFAULT_RESTAURANT_ID = "restaurant_001"
-DEFAULT_LOCATION_ID = "location_001"
 
 
 def _utc_ts() -> str:
@@ -248,6 +244,46 @@ def _persist_get_last(
         return None
 
 
+# ---------------------------------------------------------------------------
+# C10: Simple in-process rate limiter for POST /pipeline/run per tenant.
+# No external infrastructure — a sliding-window counter in a dict.
+# ---------------------------------------------------------------------------
+
+_RATE_LIMIT_WINDOW_S = 60  # 1-minute sliding window
+_RATE_LIMIT_MAX_REQUESTS = 5  # max 5 pipeline runs per tenant per minute
+
+_rate_lock = __import__("threading").Lock()
+_rate_store: Dict[str, List[float]] = {}
+
+
+def _rate_limit_key(restaurant_id: str, location_id: str) -> str:
+    return f"{restaurant_id}:{location_id}"
+
+
+def _check_rate_limit(restaurant_id: str, location_id: str) -> Tuple[bool, int]:
+    """Check and record a request against the per-tenant rate limit.
+
+    Returns (allowed, retry_after_s). When allowed, the current timestamp
+    is recorded. When denied, retry_after_s is the seconds until the oldest
+    request in the window expires.
+    """
+    key = _rate_limit_key(restaurant_id, location_id)
+    now = time.time()
+    cutoff = now - _RATE_LIMIT_WINDOW_S
+
+    with _rate_lock:
+        hits = _rate_store.get(key, [])
+        # Drop expired entries.
+        hits = [t for t in hits if t > cutoff]
+        if len(hits) >= _RATE_LIMIT_MAX_REQUESTS:
+            retry_after = int(hits[0] + _RATE_LIMIT_WINDOW_S - now) + 1
+            _rate_store[key] = hits
+            return False, max(retry_after, 1)
+        hits.append(now)
+        _rate_store[key] = hits
+        return True, 0
+
+
 bp: Optional[Any] = None
 
 try:
@@ -422,6 +458,25 @@ try:
                     code="MISSING_TENANT_KEYS",
                     request_id=request_id,
                 )
+
+            # C10: per-tenant rate limit on POST /pipeline/run.
+            allowed, retry_after = _check_rate_limit(
+                tenant["restaurant_id"], tenant["location_id"],
+            )
+            if not allowed:
+                resp = _response_error(
+                    f"Rate limit exceeded for tenant {tenant['restaurant_id']}:{tenant['location_id']}. "
+                    f"Retry after {retry_after}s.",
+                    429,
+                    code="RATE_LIMITED",
+                    request_id=request_id,
+                )
+                # Attach Retry-After header if the framework allows it.
+                try:
+                    resp.headers["Retry-After"] = str(retry_after)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                return resp
 
             options = _collect_options_from_json(payload)
             # Enqueue the pipeline as a background job — do not run inside the request.
