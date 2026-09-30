@@ -6,10 +6,16 @@ INVENTORY_ERROR_MISSING_SALES = "INVENTORY_MISSING_SALES"
 INVENTORY_ERROR_INVALID_SALES = "INVENTORY_INVALID_SALES"
 INVENTORY_ERROR_MISSING_BOM = "INVENTORY_MISSING_BOM"
 INVENTORY_ERROR_INVALID_BOM = "INVENTORY_INVALID_BOM"
+WASTE_ERROR_MISSING_INPUT = "WASTE_MISSING_INPUT"
+WASTE_ERROR_INVALID_INPUT = "WASTE_INVALID_INPUT"
 
 # Waste ratio constant — rule, not a trained model.
 # Estimated food waste = 8 % of daily sales value.
 WASTE_RATIO = 0.08
+
+# Default weekly waste target — a rule constant, not an optimised value.
+# Target: no more than 5 % of weekly sales value as waste.
+DEFAULT_WEEKLY_WASTE_TARGET_PCT = 0.05
 
 DEFAULT_RESTAURANT_ID = "restaurant_001"
 DEFAULT_LOCATION_ID = "location_001"
@@ -19,18 +25,40 @@ def _utc_ts() -> str:
     return datetime.utcnow().isoformat()
 
 
-def _waste_for_sales(predicted_sales: float) -> float:
-    """Fixed-ratio rule: estimated food waste derived from daily sales.
+def _waste_for_sales(daily_sales: float) -> float:
+    """Fixed-ratio rule: estimated food waste derived from a numeric daily sales total.
 
     This is a rule — it is NOT a waste model or ML prediction.
     """
-    return round(predicted_sales * WASTE_RATIO, 2)
+    return round(float(daily_sales) * WASTE_RATIO, 2)
+
+
+def _validate_waste_input(sales: Any) -> Optional[str]:
+    """Validate that sales rows carry a numeric daily_sales_total.
+
+    Returns None if valid, or a stable error code string if invalid / missing.
+    """
+    if not isinstance(sales, list) or not sales:
+        return WASTE_ERROR_MISSING_INPUT
+
+    for row in sales:
+        if not isinstance(row, dict):
+            return WASTE_ERROR_INVALID_INPUT
+        v = row.get("daily_sales_total")
+        if not isinstance(v, (int, float)):
+            return WASTE_ERROR_INVALID_INPUT
+
+    return None
 
 
 def _build_waste_plan(
     sales: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Build a per-day waste estimate from actual sales rows using a fixed ratio."""
+    """Build a per-day waste estimate from actual sales rows using a fixed ratio.
+
+    Every value is numeric — no fake kg is invented. If the caller passes
+    non-numeric inputs the caller must call _validate_waste_input first.
+    """
     plan: List[Dict[str, Any]] = []
     for i, row in enumerate(sales):
         daily = float(row.get("daily_sales_total", 0))
@@ -42,6 +70,24 @@ def _build_waste_plan(
             }
         )
     return plan
+
+
+def _weekly_waste_target(
+    sales: List[Dict[str, Any]],
+    target_pct: float,
+) -> Dict[str, Any]:
+    """Compute the weekly waste target from the most recent 7 sales rows.
+
+    target_pct is a fraction (0.05 = 5 %). The target is a numeric kg-equiv-
+    alent of the sales value — it is a rule, not an optimised value.
+    """
+    recent = sales[-7:] if len(sales) >= 7 else sales
+    weekly_sales = sum(float(r.get("daily_sales_total", 0)) for r in recent)
+    return {
+        "target_pct": target_pct,
+        "weekly_sales_basis": round(weekly_sales, 2),
+        "weekly_waste_target": round(weekly_sales * target_pct, 2),
+    }
 
 
 def _validate_bom(recipes: Any) -> Optional[str]:
@@ -229,7 +275,22 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         }
 
     inventory_plan = _build_bom_inventory_plan(recipes)
+
+    # C9: waste must be numeric from inputs or an error. Validate the same
+    # sales rows that feed the waste plan — no fake kg on missing inputs.
+    waste_error = _validate_waste_input(sales)
+    if waste_error is not None:
+        print(f"[{_utc_ts()}] dashboard_update waste status=error code={waste_error}")
+        return {
+            "status": "error",
+            "error_code": waste_error,
+            "restaurant_id": restaurant_id,
+            "location_id": location_id,
+            "timestamp": _utc_ts(),
+        }
+
     waste_plan = _build_waste_plan(sales)
+    weekly_waste_target = _weekly_waste_target(sales, DEFAULT_WEEKLY_WASTE_TARGET_PCT)
 
     forecast = prediction_data.get("forecast", [])
     staffing_plan = optimization_data.get("staffing_plan", [])
@@ -258,11 +319,12 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "recipe/BOM: total_quantity = quantity_per_meal * expected_meals per ingredient"
         ),
         "waste_plan": waste_plan,
-        # waste_method describes the waste rule honestly — not ML, not a waste model.
+        # C9: waste is numeric from inputs with a weekly target. method=rule.
         "waste_method": "rule",
         "waste_method_description": (
             f"fixed ratio: {WASTE_RATIO} estimated waste per sales unit"
         ),
+        "weekly_waste_target": weekly_waste_target,
         "gpt_insight_status": gpt_data.get("gpt_insight_status"),
         "insight_json": insight_json,
         "risk_level": risk_level,
