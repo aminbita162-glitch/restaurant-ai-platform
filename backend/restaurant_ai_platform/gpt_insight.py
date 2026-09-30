@@ -6,8 +6,28 @@ import json
 import os
 
 
-DEFAULT_RESTAURANT_ID = "restaurant_001"
-DEFAULT_LOCATION_ID = "location_001"
+# Stable public error code for AI output schema validation failures.
+GPT_INSIGHT_ERROR_SCHEMA_INVALID = "GPT_INSIGHT_SCHEMA_INVALID"
+
+# Required keys in the model's JSON output.
+_REQUIRED_INSIGHT_KEYS = frozenset({
+    "summary",
+    "staffing",
+    "inventory",
+    "waste",
+    "notes",
+    "risk_level",
+    "actions",
+})
+
+# Required keys that must be present and non-empty.
+_REQUIRED_NON_EMPTY_KEYS = frozenset({
+    "summary",
+    "risk_level",
+})
+
+# The "actions" key must be a list of short strings.
+_REQUIRED_ACTIONS_COUNT = 3
 
 
 def _utc_ts() -> str:
@@ -54,12 +74,12 @@ def _extract_context(context: Dict[str, Any]) -> Dict[str, Any]:
     restaurant_id = str(
         prediction.get("restaurant_id")
         or ingestion.get("restaurant_id")
-        or DEFAULT_RESTAURANT_ID
+        or ""
     )
     location_id = str(
         prediction.get("location_id")
         or ingestion.get("location_id")
-        or DEFAULT_LOCATION_ID
+        or ""
     )
 
     forecast = prediction.get("forecast") or prediction.get("forecast_intervals") or []
@@ -166,30 +186,103 @@ def _parse_json(raw: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         return None, f"json_parse_failed:{type(e).__name__}:{e}"
 
 
+def _validate_insight_schema(obj: Optional[Dict[str, Any]]) -> Tuple[bool, Optional[str]]:
+    """Validate that a parsed insight dict has the required schema.
+
+    Returns (valid, error_reason). When invalid, error_reason describes
+    the first failure encountered.
+    """
+    if obj is None:
+        return False, "json_parse_failed:no_object"
+
+    missing = _REQUIRED_INSIGHT_KEYS - set(obj.keys())
+    if missing:
+        return False, f"missing_keys:{sorted(missing)}"
+
+    for key in _REQUIRED_NON_EMPTY_KEYS:
+        val = obj.get(key)
+        if not isinstance(val, str) or not val.strip():
+            return False, f"empty_or_non_string:{key}"
+
+    actions = obj.get("actions")
+    if not isinstance(actions, list):
+        return False, "actions_not_list"
+    if len(actions) != _REQUIRED_ACTIONS_COUNT:
+        return False, f"actions_wrong_count:{len(actions)}:{_REQUIRED_ACTIONS_COUNT}"
+    for i, a in enumerate(actions):
+        if not isinstance(a, str) or not a.strip():
+            return False, f"action_not_string:{i}"
+
+    return True, None
+
+
+def _degraded_insight(prompt: str) -> Dict[str, Any]:
+    """Build a rule-based degraded insight when the model output is invalid.
+
+    Labeled method=rule — this is a static fallback, not model output.
+    """
+    return {
+        "summary": "Automated insight unavailable; review forecast and staffing manually.",
+        "staffing": "Refer to the staffing plan from the optimization step.",
+        "inventory": "Refer to the inventory plan from the BOM step.",
+        "waste": "Refer to the waste plan from the waste step.",
+        "notes": "AI insight was invalid or unavailable; manual review required.",
+        "risk_level": "unknown",
+        "actions": [
+            "Review the forecast and staffing plan manually.",
+            "Check inventory against the BOM plan.",
+            "Monitor waste against the weekly target.",
+        ],
+    }
+
+
 def run(context: Dict[str, Any]) -> Dict[str, Any]:
     payload = _extract_context(context)
     prompt = _build_prompt(payload)
     result = _call_openai_json(prompt)
 
-    restaurant_id = str(payload.get("restaurant_id") or DEFAULT_RESTAURANT_ID)
-    location_id = str(payload.get("location_id") or DEFAULT_LOCATION_ID)
+    restaurant_id = str(payload.get("restaurant_id") or "")
+    location_id = str(payload.get("location_id") or "")
 
     if result.get("status") == "ok":
         raw_json = str(result.get("raw_json", "{}"))
         parsed_json, parse_error = _parse_json(raw_json)
 
-        warnings: List[Dict[str, Any]] = []
-        if parse_error:
-            warnings.append(
-                {
-                    "type": "JsonParseWarning",
-                    "message": parse_error,
-                }
-            )
+        # C11: validate the model output schema. If invalid, return a
+        # rule-based degraded insight labeled method=rule — never pass raw
+        # model text as the business action list.
+        schema_valid, schema_error = _validate_insight_schema(parsed_json)
 
+        if not schema_valid:
+            degraded = _degraded_insight(prompt)
+            return {
+                "data": {
+                    "gpt_insight_status": "degraded",
+                    "gpt_insight_error_code": GPT_INSIGHT_ERROR_SCHEMA_INVALID,
+                    "gpt_insight_error_reason": schema_error or parse_error or "unknown",
+                    "method": "rule",
+                    "restaurant_id": restaurant_id,
+                    "location_id": location_id,
+                    "openai_model": result.get("model"),
+                    "insight_json_raw": raw_json,
+                    "insight_json": degraded,
+                    "timestamp": _utc_ts(),
+                },
+                "errors": [],
+                "warnings": [
+                    {
+                        "type": "GptInsightSchemaInvalid",
+                        "message": schema_error or parse_error or "unknown",
+                    },
+                ],
+                "metrics": {},
+            }
+
+        # Valid model output — return it with method=openai.
         return {
             "data": {
                 "gpt_insight_status": "ok",
+                "method": "openai",
                 "restaurant_id": restaurant_id,
                 "location_id": location_id,
                 "openai_model": result.get("model"),
@@ -198,7 +291,7 @@ def run(context: Dict[str, Any]) -> Dict[str, Any]:
                 "timestamp": _utc_ts(),
             },
             "errors": [],
-            "warnings": warnings,
+            "warnings": [],
             "metrics": {},
         }
 
