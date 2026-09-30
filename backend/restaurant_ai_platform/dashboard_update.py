@@ -4,10 +4,8 @@ from typing import Any, Dict, List, Optional
 # Stable public error codes for inventory and waste failures.
 INVENTORY_ERROR_MISSING_SALES = "INVENTORY_MISSING_SALES"
 INVENTORY_ERROR_INVALID_SALES = "INVENTORY_INVALID_SALES"
-
-# Fixed ratio constants — these are rules, not MRP or ML.
-INGREDIENTS_PER_SALES_UNIT = 0.45
-MEALS_PER_SALES_UNIT = 1 / 25
+INVENTORY_ERROR_MISSING_BOM = "INVENTORY_MISSING_BOM"
+INVENTORY_ERROR_INVALID_BOM = "INVENTORY_INVALID_BOM"
 
 # Waste ratio constant — rule, not a trained model.
 # Estimated food waste = 8 % of daily sales value.
@@ -19,17 +17,6 @@ DEFAULT_LOCATION_ID = "location_001"
 
 def _utc_ts() -> str:
     return datetime.utcnow().isoformat()
-
-
-def _inventory_for_sales(predicted_sales: float) -> Dict[str, float]:
-    """Fixed-ratio rule: ingredients and meals derived from predicted sales.
-
-    This is a rule — it is NOT MRP or inventory optimisation.
-    """
-    return {
-        "ingredients_needed": round(predicted_sales * INGREDIENTS_PER_SALES_UNIT, 2),
-        "estimated_meals": round(predicted_sales * MEALS_PER_SALES_UNIT, 2),
-    }
 
 
 def _waste_for_sales(predicted_sales: float) -> float:
@@ -57,22 +44,79 @@ def _build_waste_plan(
     return plan
 
 
-def _build_inventory_plan(
-    sales: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """Build a per-day inventory estimate from actual sales rows using fixed ratios."""
-    plan: List[Dict[str, Any]] = []
-    for i, row in enumerate(sales):
-        daily = float(row.get("daily_sales_total", 0))
-        inv = _inventory_for_sales(daily)
-        plan.append(
+def _validate_bom(recipes: Any) -> Optional[str]:
+    """Validate a recipe/BOM structure.
+
+    Expected shape:
+        recipes = [
             {
-                "day_index": i + 1,
-                "daily_sales_total": daily,
-                "ingredients_needed": inv["ingredients_needed"],
-                "estimated_meals": inv["estimated_meals"],
-            }
-        )
+                "name": "Margherita Pizza",
+                "expected_meals": 50,
+                "ingredients": [
+                    {"name": "flour", "unit": "kg", "quantity_per_meal": 0.15},
+                    ...
+                ],
+            },
+            ...
+        ]
+
+    Returns None if valid, or a stable error code string if invalid.
+    """
+    if not isinstance(recipes, list) or not recipes:
+        return INVENTORY_ERROR_MISSING_BOM
+
+    for recipe in recipes:
+        if not isinstance(recipe, dict):
+            return INVENTORY_ERROR_INVALID_BOM
+        name = recipe.get("name")
+        meals = recipe.get("expected_meals")
+        ingredients = recipe.get("ingredients")
+        if not name or not isinstance(name, str):
+            return INVENTORY_ERROR_INVALID_BOM
+        if not isinstance(meals, (int, float)) or meals < 0:
+            return INVENTORY_ERROR_INVALID_BOM
+        if not isinstance(ingredients, list) or not ingredients:
+            return INVENTORY_ERROR_INVALID_BOM
+        for ing in ingredients:
+            if not isinstance(ing, dict):
+                return INVENTORY_ERROR_INVALID_BOM
+            if not ing.get("name") or not isinstance(ing.get("name"), str):
+                return INVENTORY_ERROR_INVALID_BOM
+            if not isinstance(ing.get("quantity_per_meal"), (int, float)) or ing.get("quantity_per_meal") < 0:
+                return INVENTORY_ERROR_INVALID_BOM
+            if not ing.get("unit") or not isinstance(ing.get("unit"), str):
+                return INVENTORY_ERROR_INVALID_BOM
+
+    return None
+
+
+def _build_bom_inventory_plan(
+    recipes: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Build an inventory list from an explicit recipe/BOM structure.
+
+    Each recipe contributes ``quantity_per_meal * expected_meals`` per ingredient.
+    No kg quantities are invented — every value traces back to an explicit BOM entry.
+    """
+    plan: List[Dict[str, Any]] = []
+
+    for recipe in recipes:
+        meals = float(recipe.get("expected_meals", 0))
+        ingredients = recipe.get("ingredients", [])
+        for ing in ingredients:
+            qty_per_meal = float(ing.get("quantity_per_meal", 0))
+            total_qty = round(qty_per_meal * meals, 2)
+            plan.append(
+                {
+                    "recipe": recipe.get("name"),
+                    "ingredient": ing.get("name"),
+                    "unit": ing.get("unit"),
+                    "quantity_per_meal": qty_per_meal,
+                    "expected_meals": round(meals, 2),
+                    "total_quantity": total_qty,
+                }
+            )
+
     return plan
 
 
@@ -144,8 +188,8 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         or DEFAULT_LOCATION_ID
     )
 
-    # Inventory is built from actual sales rows in context, not from forecast.
-    # Guard: sales must be present and valid.
+    # Inventory is built from an explicit recipe/BOM structure in context.
+    # C8: do NOT call a fixed ratio MRP. Require recipes/BOM or error.
     sales = context.get("sales")
     if not sales or not isinstance(sales, list):
         code = INVENTORY_ERROR_MISSING_SALES
@@ -171,7 +215,20 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                 "timestamp": _utc_ts(),
             }
 
-    inventory_plan = _build_inventory_plan(sales)
+    # C8: require an explicit recipe/BOM structure — do not invent kg quantities.
+    recipes = context.get("recipes") or context.get("bom")
+    bom_error = _validate_bom(recipes)
+    if bom_error is not None:
+        print(f"[{_utc_ts()}] dashboard_update inventory status=error code={bom_error}")
+        return {
+            "status": "error",
+            "error_code": bom_error,
+            "restaurant_id": restaurant_id,
+            "location_id": location_id,
+            "timestamp": _utc_ts(),
+        }
+
+    inventory_plan = _build_bom_inventory_plan(recipes)
     waste_plan = _build_waste_plan(sales)
 
     forecast = prediction_data.get("forecast", [])
@@ -195,11 +252,10 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "forecast": forecast,
         "staffing_plan": staffing_plan,
         "inventory_plan": inventory_plan,
-        # method and method_description describe the inventory rule honestly.
-        "inventory_method": "rule",
+        # C8: inventory is built from an explicit recipe/BOM, not a fixed ratio MRP.
+        "inventory_method": "bom_rule",
         "inventory_method_description": (
-            f"fixed ratios: {INGREDIENTS_PER_SALES_UNIT} ingredients per sales unit, "
-            f"{round(MEALS_PER_SALES_UNIT, 4)} meals per sales unit"
+            "recipe/BOM: total_quantity = quantity_per_meal * expected_meals per ingredient"
         ),
         "waste_plan": waste_plan,
         # waste_method describes the waste rule honestly — not ML, not a waste model.
