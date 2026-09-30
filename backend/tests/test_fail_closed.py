@@ -97,6 +97,65 @@ def test_forecast_under_7_rows_returns_error():
     )
 
 
+# ---------------------------------------------------------------------------
+# Test 4 — C12: structured log lines include run_id, step, duration_ms
+# ---------------------------------------------------------------------------
+
+def test_structured_logs_include_run_id_step_duration_ms():
+    import io
+    import contextlib
+
+    from restaurant_ai_platform import orchestrator
+
+    # Run a dry-run pipeline so steps are planned but no heavy work is done.
+    # Capture stdout to inspect the structured log lines.
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        orchestrator.run_pipeline(options={"dry_run": True})
+
+    output = buf.getvalue()
+    lines = [l.strip() for l in output.splitlines() if l.strip()]
+
+    assert lines, "Expected at least one log line from run_pipeline"
+
+    # Every log line must include run_id and duration_ms.
+    # Step-level events must additionally include step=.
+    for line in lines:
+        assert "run_id=" in line, (
+            f"Log line missing run_id: {line}"
+        )
+        assert "duration_ms=" in line, (
+            f"Log line missing duration_ms: {line}"
+        )
+
+    # At least one line should have step= (pipeline_start/dry_run may not,
+    # but step-level events do). For a dry_run, the pipeline_dry_run event
+    # is pipeline-level. Run a real minimal pipeline to get step lines.
+    buf2 = io.StringIO()
+    with contextlib.redirect_stdout(buf2):
+        orchestrator.run_pipeline(
+            options={
+                "steps": "5_ml_prediction",
+                "restaurant_id": "test_rid",
+                "location_id": "test_lid",
+            },
+        )
+
+    output2 = buf2.getvalue()
+    step_lines = [l.strip() for l in output2.splitlines() if "step=" in l]
+
+    assert step_lines, (
+        "Expected at least one step-level log line with step="
+    )
+
+    for line in step_lines:
+        assert "run_id=" in line, f"Step log line missing run_id: {line}"
+        assert "step=" in line, f"Step log line missing step: {line}"
+        assert "duration_ms=" in line, f"Step log line missing duration_ms: {line}"
+
+    print("PASS test_structured_logs_include_run_id_step_duration_ms")
+
+
 if __name__ == "__main__":
     test_ingestion_missing_file_returns_error()
     print("PASS test_ingestion_missing_file_returns_error")
@@ -106,5 +165,7 @@ if __name__ == "__main__":
 
     test_forecast_under_7_rows_returns_error()
     print("PASS test_forecast_under_7_rows_returns_error")
+
+    test_structured_logs_include_run_id_step_duration_ms()
 
     print("\nAll smoke tests passed.")

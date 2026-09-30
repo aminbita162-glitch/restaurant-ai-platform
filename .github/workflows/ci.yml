@@ -19,7 +19,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install Flask==3.0.0
+        run: pip install Flask==3.0.0 pytest
 
       - name: Run fail-closed smoke tests
         run: python backend/tests/test_fail_closed.py
