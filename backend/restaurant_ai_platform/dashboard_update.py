@@ -6,6 +6,7 @@ INVENTORY_ERROR_MISSING_SALES = "INVENTORY_MISSING_SALES"
 INVENTORY_ERROR_INVALID_SALES = "INVENTORY_INVALID_SALES"
 INVENTORY_ERROR_MISSING_BOM = "INVENTORY_MISSING_BOM"
 INVENTORY_ERROR_INVALID_BOM = "INVENTORY_INVALID_BOM"
+INVENTORY_ERROR_MISSING_ON_HAND = "INVENTORY_MISSING_ON_HAND"
 WASTE_ERROR_MISSING_INPUT = "WASTE_MISSING_INPUT"
 WASTE_ERROR_INVALID_INPUT = "WASTE_INVALID_INPUT"
 
@@ -17,8 +18,6 @@ WASTE_RATIO = 0.08
 # Target: no more than 5 % of weekly sales value as waste.
 DEFAULT_WEEKLY_WASTE_TARGET_PCT = 0.05
 
-DEFAULT_RESTAURANT_ID = "restaurant_001"
-DEFAULT_LOCATION_ID = "location_001"
 
 
 def _utc_ts() -> str:
@@ -34,7 +33,7 @@ def _waste_for_sales(daily_sales: float) -> float:
 
 
 def _validate_waste_input(sales: Any) -> Optional[str]:
-    """Validate that sales rows carry a numeric daily_sales_total.
+    """Validate that sales rows carry a numeric net_sales value.
 
     Returns None if valid, or a stable error code string if invalid / missing.
     """
@@ -44,7 +43,7 @@ def _validate_waste_input(sales: Any) -> Optional[str]:
     for row in sales:
         if not isinstance(row, dict):
             return WASTE_ERROR_INVALID_INPUT
-        v = row.get("daily_sales_total")
+        v = row.get("net_sales")
         if not isinstance(v, (int, float)):
             return WASTE_ERROR_INVALID_INPUT
 
@@ -61,11 +60,11 @@ def _build_waste_plan(
     """
     plan: List[Dict[str, Any]] = []
     for i, row in enumerate(sales):
-        daily = float(row.get("daily_sales_total", 0))
+        daily = float(row.get("net_sales", 0))
         plan.append(
             {
                 "day_index": i + 1,
-                "daily_sales_total": daily,
+                "net_sales": daily,
                 "estimated_waste": _waste_for_sales(daily),
             }
         )
@@ -82,12 +81,31 @@ def _weekly_waste_target(
     alent of the sales value — it is a rule, not an optimised value.
     """
     recent = sales[-7:] if len(sales) >= 7 else sales
-    weekly_sales = sum(float(r.get("daily_sales_total", 0)) for r in recent)
+    weekly_sales = sum(float(r.get("net_sales", 0)) for r in recent)
     return {
         "target_pct": target_pct,
         "weekly_sales_basis": round(weekly_sales, 2),
         "weekly_waste_target": round(weekly_sales * target_pct, 2),
     }
+
+
+def _validate_on_hand(on_hand: Any) -> Optional[str]:
+    """Validate the on_hand inventory dict.
+
+    on_hand must be a dict mapping ingredient name (str) to quantity on hand
+    (int or float, >= 0). An empty dict is valid — it means nothing is on hand.
+    Returns None if valid, or INVENTORY_MISSING_ON_HAND if absent/invalid.
+    """
+    if on_hand is None:
+        return INVENTORY_ERROR_MISSING_ON_HAND
+    if not isinstance(on_hand, dict):
+        return INVENTORY_ERROR_MISSING_ON_HAND
+    for k, v in on_hand.items():
+        if not isinstance(k, str):
+            return INVENTORY_ERROR_MISSING_ON_HAND
+        if not isinstance(v, (int, float)) or v < 0:
+            return INVENTORY_ERROR_MISSING_ON_HAND
+    return None
 
 
 def _validate_bom(recipes: Any) -> Optional[str]:
@@ -138,11 +156,16 @@ def _validate_bom(recipes: Any) -> Optional[str]:
 
 def _build_bom_inventory_plan(
     recipes: List[Dict[str, Any]],
+    on_hand: Dict[str, float],
 ) -> List[Dict[str, Any]]:
-    """Build an inventory list from an explicit recipe/BOM structure.
+    """Build an inventory purchase list from a recipe/BOM structure and on-hand stock.
 
-    Each recipe contributes ``quantity_per_meal * expected_meals`` per ingredient.
-    No kg quantities are invented — every value traces back to an explicit BOM entry.
+    For each ingredient:
+      suggested_purchase = max(0, total_quantity - on_hand_qty)
+
+    No kg quantities are invented — every value traces back to explicit BOM
+    entries and the caller-supplied on_hand dict.
+    method=bom_rule. No MRP.
     """
     plan: List[Dict[str, Any]] = []
 
@@ -150,16 +173,21 @@ def _build_bom_inventory_plan(
         meals = float(recipe.get("expected_meals", 0))
         ingredients = recipe.get("ingredients", [])
         for ing in ingredients:
+            ing_name = ing.get("name", "")
             qty_per_meal = float(ing.get("quantity_per_meal", 0))
             total_qty = round(qty_per_meal * meals, 2)
+            on_hand_qty = float(on_hand.get(ing_name, 0))
+            suggested = round(max(0.0, total_qty - on_hand_qty), 2)
             plan.append(
                 {
                     "recipe": recipe.get("name"),
-                    "ingredient": ing.get("name"),
+                    "ingredient": ing_name,
                     "unit": ing.get("unit"),
                     "quantity_per_meal": qty_per_meal,
                     "expected_meals": round(meals, 2),
                     "total_quantity": total_qty,
+                    "on_hand": round(on_hand_qty, 2),
+                    "suggested_purchase": suggested,
                 }
             )
 
@@ -310,16 +338,16 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     restaurant_id = (
         context.get("restaurant_id")
         or prediction_data.get("restaurant_id")
-        or DEFAULT_RESTAURANT_ID
+        or ""
     )
     location_id = (
         context.get("location_id")
         or prediction_data.get("location_id")
-        or DEFAULT_LOCATION_ID
+        or ""
     )
 
-    # Inventory is built from an explicit recipe/BOM structure in context.
-    # C8: do NOT call a fixed ratio MRP. Require recipes/BOM or error.
+    # Inventory is built from an explicit recipe/BOM structure + on_hand stock.
+    # Require recipes/BOM and on_hand or error. Do not invent kg.
     sales = context.get("sales")
     if not sales or not isinstance(sales, list):
         code = INVENTORY_ERROR_MISSING_SALES
@@ -332,9 +360,9 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "timestamp": _utc_ts(),
         }
 
-    # Validate each sales row has a numeric daily_sales_total.
+    # Validate each sales row has a numeric net_sales value.
     for row in sales:
-        if not isinstance(row, dict) or not isinstance(row.get("daily_sales_total"), (int, float)):
+        if not isinstance(row, dict) or not isinstance(row.get("net_sales"), (int, float)):
             code = INVENTORY_ERROR_INVALID_SALES
             print(f"[{_utc_ts()}] dashboard_update inventory status=error code={code}")
             return {
@@ -345,7 +373,7 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                 "timestamp": _utc_ts(),
             }
 
-    # C8: require an explicit recipe/BOM structure — do not invent kg quantities.
+    # Require an explicit recipe/BOM structure — do not invent kg quantities.
     recipes = context.get("recipes") or context.get("bom")
     bom_error = _validate_bom(recipes)
     if bom_error is not None:
@@ -358,7 +386,20 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "timestamp": _utc_ts(),
         }
 
-    inventory_plan = _build_bom_inventory_plan(recipes)
+    # Require on_hand — do not invent stock levels.
+    on_hand = context.get("on_hand")
+    on_hand_error = _validate_on_hand(on_hand)
+    if on_hand_error is not None:
+        print(f"[{_utc_ts()}] dashboard_update inventory status=error code={on_hand_error}")
+        return {
+            "status": "error",
+            "error_code": on_hand_error,
+            "restaurant_id": restaurant_id,
+            "location_id": location_id,
+            "timestamp": _utc_ts(),
+        }
+
+    inventory_plan = _build_bom_inventory_plan(recipes, on_hand)
 
     # C9: waste must be numeric from inputs or an error. Validate the same
     # sales rows that feed the waste plan — no fake kg on missing inputs.
