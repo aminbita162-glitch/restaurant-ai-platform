@@ -202,7 +202,7 @@ Tenant-aware example:
 | Postgres persistence (optional) | Implemented | When `DATABASE_URL` is set; SQLite local-only otherwise. Tenant-scoped. |
 | Day-of-week sales forecast | Implemented | `method=dow_heuristic`; 7-day horizon from weekday buckets. Thin history (<7 rows) errors. |
 | Backtest quality gate | Implemented | Hold-out MAPE; `labor_recommendation_allowed=false` when MAPE > 50% or insufficient history. |
-| Block shift planner | Implemented | 2-hour blocks with `start`, `end`, `role`, `n`. `method=rule` — not a constraint solver. |
+| Block shift planner | Implemented | 2-hour blocks with `start`, `end`, `role`, `n`. Roles: cook, floor, cashier (or caller-supplied list). `method=rule`, `approval=proposed`. `labor_recommendation_allowed=false` returns `LABOR_RECOMMENDATION_DISALLOWED` with no headcount. `estimated_labor_cost` only when `hourly_cost` supplied. |
 | BOM inventory | Implemented | Requires explicit recipe/BOM structure; errors if missing. `inventory_method=bom_rule`. No MRP. |
 | Waste numeric contract | Implemented | Numeric from inputs; errors on missing/invalid. `waste_method=rule` + `weekly_waste_target`. |
 | Tenant API gate | Implemented | `X-Api-Key` required. Tenant keys must not be defaulted. Per-tenant rate limit on `POST /pipeline/run`. |
