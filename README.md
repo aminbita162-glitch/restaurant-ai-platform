@@ -214,7 +214,7 @@ Tenant-aware example:
 | Staffing optimization | Experimental | Fixed ratio (1 per 600 sales). Not a constraint solver. |
 | Real-data connectors (POS/ERP) | Planned | CSV-only ingestion today. |
 | Full authentication / IdP | Planned | `X-Api-Key` + `X-Tenant-Token` (env-mapped). No IdP, no SSO, no RBAC. |
-| Frontend dashboard | Planned | Backend payload only; no UI. |
+| Frontend dashboard | Implemented | `GET /manager` serves `backend/static/manager.html` — mobile manager approval page. No customer-facing SaaS UI. |
 | Production observability | Planned | Structured logs exist; no alerting/tracing/metrics dashboards. |
 | Multi-tenant isolation at scale | Planned | In-process state; not million-tenant isolated cells. |
 
