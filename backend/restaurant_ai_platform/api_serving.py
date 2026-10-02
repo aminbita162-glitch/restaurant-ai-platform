@@ -177,10 +177,42 @@ def _run_pipeline(orchestrator: Any, options: Dict[str, Any]) -> Dict[str, Any]:
             return orchestrator.run_pipeline()  # type: ignore[misc]
 
 
+def _parse_tenant_tokens() -> Dict[str, Tuple[str, str]]:
+    """Parse TENANT_TOKENS env var into a token → (restaurant_id, location_id) map.
+
+    Format: comma-separated entries, each entry is token:restaurant_id:location_id.
+    Example: TENANT_TOKENS=tok1:rest_a:loc_a,tok2:rest_b:loc_b
+
+    Returns an empty dict when the env var is absent or empty.
+    Malformed entries are skipped (not crashed on).
+    """
+    raw = os.environ.get("TENANT_TOKENS", "").strip()
+    if not raw:
+        return {}
+    mapping: Dict[str, Tuple[str, str]] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        parts = entry.split(":", 2)
+        if len(parts) == 3:
+            token, restaurant_id, location_id = parts
+            token = token.strip()
+            restaurant_id = restaurant_id.strip()
+            location_id = location_id.strip()
+            if token and restaurant_id and location_id:
+                mapping[token] = (restaurant_id, location_id)
+    return mapping
+
+
+def _resolve_tenant_token(token: str) -> Optional[Tuple[str, str]]:
+    """Return (restaurant_id, location_id) for a known token, or None if unknown."""
+    mapping = _parse_tenant_tokens()
+    return mapping.get(token)
+
+
 def _check_auth(request_id: str) -> Optional[Any]:
     """Return an error response if the request is not authorised, else None.
 
-    Rules (PHASE 7):
+    Rules:
     - If RESTAURANT_AI_API_KEY env var is empty, return 503 AUTH_NOT_CONFIGURED.
     - If X-Api-Key header is missing or does not match, return 401 AUTH_UNAUTHORIZED.
     - The key value is never logged.
@@ -450,7 +482,26 @@ try:
             if not isinstance(payload, dict):
                 payload = {"_raw": payload}
 
-            tenant = _collect_tenant_from_json(payload)
+            # R7: If X-Tenant-Token is present, resolve tenant from the token.
+            # Body tenant ids are ignored when a token is present.
+            # Missing or unknown token returns 401 — do not default a tenant.
+            tenant_token = (request.headers.get("X-Tenant-Token") or "").strip()
+            if tenant_token:
+                resolved = _resolve_tenant_token(tenant_token)
+                if resolved is None:
+                    return _response_error(
+                        "Unknown or invalid X-Tenant-Token",
+                        401,
+                        code="AUTH_UNAUTHORIZED",
+                        request_id=request_id,
+                    )
+                tenant = {
+                    "restaurant_id": resolved[0],
+                    "location_id": resolved[1],
+                }
+            else:
+                tenant = _collect_tenant_from_json(payload)
+
             if not tenant["restaurant_id"] or not tenant["location_id"]:
                 return _response_error(
                     "restaurant_id and location_id are required to run the pipeline",
@@ -479,6 +530,10 @@ try:
                 return resp
 
             options = _collect_options_from_json(payload)
+            # Always use the authoritative tenant — if a token was present the
+            # token-resolved tenant overrides any body-supplied tenant ids.
+            options["restaurant_id"] = tenant["restaurant_id"]
+            options["location_id"] = tenant["location_id"]
             # Enqueue the pipeline as a background job — do not run inside the request.
             job_id = orchestrator.enqueue_job(options)
 

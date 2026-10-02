@@ -205,7 +205,7 @@ Tenant-aware example:
 | Block shift planner | Implemented | 2-hour blocks with `start`, `end`, `role`, `n`. Roles: cook, floor, cashier (or caller-supplied list). `method=rule`, `approval=proposed`. `labor_recommendation_allowed=false` returns `LABOR_RECOMMENDATION_DISALLOWED` with no headcount. `estimated_labor_cost` only when `hourly_cost` supplied. |
 | BOM inventory | Implemented | Requires explicit recipe/BOM and `on_hand` dict; errors if either missing. `suggested_purchase = recipe_qty - on_hand`, never below zero. `inventory_method=bom_rule`. No MRP. |
 | Waste events contract | Implemented | `waste_events` list (item, qty, reason, ts) required. `waste_method=measured`, `waste_total` = sum of qty when events supplied. Absent events → `waste_total=null`, `WASTE_NO_EVENTS_PROVIDED`. No kg invented from sales ratio. |
-| Tenant API gate | Implemented | `X-Api-Key` required. Tenant keys must not be defaulted. Per-tenant rate limit on `POST /pipeline/run`. |
+| Tenant API gate | Implemented | `X-Api-Key` required. `X-Tenant-Token` header maps token → tenant from env `TENANT_TOKENS` (`token:restaurant:location` pairs). Token present → body tenant ignored. Unknown token → 401. Tenant keys must not be defaulted. Per-tenant rate limit on `POST /pipeline/run`. |
 | AI output schema gate | Implemented | Invalid model JSON → `degraded` with `method=rule`; valid → `method=openai`. Raw text never passes as actions. |
 | Structured run logs | Implemented | Every log line includes `run_id`, `step`, `duration_ms`. |
 | Manager decision payload | Implemented | Compact payload with `approval=proposed`, `actions[]`, forecast/staffing/inventory/waste summary. |
