@@ -1,32 +1,57 @@
-# DEMO Sales Data — Demo Install Pack
+# DEMO DATA — Restaurant AI Platform
 
-> **DEMO** — This file is for demonstration only. Do not use in production ingestion.
+> **Label:** DEMO
+> This directory contains demonstration data only.
+> It is not real restaurant data. Do not use it as a production source.
 
-## Files
+---
 
-| File | Purpose |
-|---|---|
-| `demo_sales.csv` | DEMO sample sales data (15 daily rows) for testing the pipeline. |
-| `DEMO_README.md` | This file. DEMO documentation for the demo install pack. |
+## What is in this directory
 
-## Usage
+Sample CSV files and fixtures used when `demo=true` is passed to the pipeline.
 
-1. Copy `demo_sales.csv` to a tenant-specific path, for example:
-   ```
-   data/<restaurant_id>__<location_id>__sales.csv
-   ```
-2. Run the pipeline with `demo=true` to use DEMO sample data.
-3. The production ingestion default (`upload_sales.csv`) is **not** overwritten by this DEMO pack.
+The demo path is the **only** path to synthetic data. The system will never silently
+fall back to demo data. A caller must explicitly set `demo=true` in the request body.
 
-## Format
+---
 
-The CSV has two columns:
+## How to use demo mode
 
-| Column | Type | Description |
-|---|---|---|
-| `date` | ISO date string | The calendar date of the sales row |
-| `daily_sales_total` | float | Total sales value for that date |
+Pass `demo=true` in the POST body:
 
-## DEMO Label
+```json
+{
+  "restaurant_id": "demo_rest",
+  "location_id": "demo_loc",
+  "demo": true
+}
+```
 
-Both files in this pack are labeled **DEMO** in the file name or header. This pack is not a production data source.
+The pipeline returns an empty sales list and placeholder inventory/attendance values.
+No forecast or BOM calculation is performed on demo data.
+
+---
+
+## What demo mode does NOT do
+
+- Does not load or simulate real sales rows.
+- Does not produce a valid forecast (no real `net_sales` data).
+- Does not represent any actual restaurant's operational data.
+- Is not suitable for staffing, inventory, or waste decisions.
+
+---
+
+## For a live restaurant
+
+Supply a tenant CSV file at:
+
+```
+backend/data/<restaurant_id>__<location_id>__sales.csv
+```
+
+Required columns per row: `date`, `net_sales`, `restaurant_id`, `location_id`.
+
+A persistent Postgres database (`DATABASE_URL`) and the worker process (`python worker.py`)
+are required before running the pipeline against real data.
+
+See the main `README.md` — **30-Day Install** section for setup steps.

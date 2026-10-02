@@ -213,7 +213,7 @@ Tenant-aware example:
 | Forecast accuracy | Experimental | Heuristic (day-of-week average + 2% growth). Not a trained ML model. |
 | Staffing optimization | Experimental | Fixed ratio (1 per 600 sales). Not a constraint solver. |
 | Real-data connectors (POS/ERP) | Planned | CSV-only ingestion today. |
-| Full authentication / IdP | Planned | `X-Api-Key` only; not token-bound tenant isolation. |
+| Full authentication / IdP | Planned | `X-Api-Key` + `X-Tenant-Token` (env-mapped). No IdP, no SSO, no RBAC. |
 | Frontend dashboard | Planned | Backend payload only; no UI. |
 | Production observability | Planned | Structured logs exist; no alerting/tracing/metrics dashboards. |
 | Multi-tenant isolation at scale | Planned | In-process state; not million-tenant isolated cells. |
@@ -222,15 +222,83 @@ Tenant-aware example:
 
 ## Limitations
 
-This project is a development baseline. It is not a production-hardened, enterprise-authenticated, or multi-tenant-isolated deployment.
+This project is a development baseline. It is not a hardened, fully-authenticated, or multi-tenant-isolated deployment.
 
 - Forecasting is heuristic, not a trained ML model.
 - Staffing is a fixed-ratio rule, not a constraint optimizer.
-- Inventory requires an explicit recipe/BOM; no MRP or demand-driven optimization.
-- Waste is a fixed-ratio estimate, not a measured event store.
-- API auth is `X-Api-Key` only; no full IdP or token-bound tenant isolation.
+- Inventory requires an explicit recipe/BOM and on-hand stock; no MRP or demand-driven optimization.
+- Waste total comes from supplied `waste_events`; absent events return null, not a ratio estimate.
+- API auth is `X-Api-Key` + optional `X-Tenant-Token` (env-mapped); no full IdP.
 - No customer-facing frontend.
 - No live POS/ERP connectors.
+
+---
+
+## 30-Day Install (Demo Mode)
+
+> This walkthrough uses `demo=true`. It does **not** connect to a real restaurant data source.
+> For a live restaurant, Postgres (`DATABASE_URL`) and the worker process (`python worker.py`)
+> are required. The demo path is for evaluation only.
+
+### Prerequisites
+
+- Python 3.9+
+- `pip install -r backend/requirements.txt`
+- Set `RESTAURANT_AI_API_KEY` to any non-empty string.
+
+### Step 1 — Start the API server
+
+```bash
+cd backend
+gunicorn app:app --bind 0.0.0.0:8000
+```
+
+### Step 2 — Start the worker (required for live use; optional in demo)
+
+In a separate terminal:
+
+```bash
+cd backend
+python worker.py
+```
+
+> For a live restaurant, the worker must run as a separate process alongside the API server.
+> Without it, pipeline jobs remain queued and never execute.
+
+### Step 3 — Configure Postgres (required for live use)
+
+Set the environment variable before starting the server:
+
+```bash
+export DATABASE_URL=postgresql://user:password@host:5432/dbname
+```
+
+> Without `DATABASE_URL`, runs are stored in SQLite on ephemeral disk and will not survive
+> a server restart. For a live restaurant, a persistent Postgres database is required.
+
+### Step 4 — Run the pipeline in demo mode
+
+```bash
+curl -X POST http://localhost:8000/api/v1/pipeline/run \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: $RESTAURANT_AI_API_KEY" \
+  -d '{"restaurant_id":"demo_rest","location_id":"demo_loc","demo":true}'
+```
+
+The response returns `status: queued` and a `job_id`. The worker executes the job.
+
+### Step 5 — Check the result
+
+```bash
+curl "http://localhost:8000/api/v1/pipeline/last-run?restaurant_id=demo_rest&location_id=demo_loc" \
+  -H "X-Api-Key: $RESTAURANT_AI_API_KEY"
+```
+
+### What the demo does NOT do
+
+- Does not load real sales data. Use `demo=true` only for evaluation.
+- Does not run a live forecast on real data without a tenant CSV file.
+- Does not persist data across restarts without `DATABASE_URL`.
 
 ---
 
@@ -284,7 +352,7 @@ The system has been verified against:
 - fail-closed smoke tests (4 tests)
 - last-run persistence validation
 
-Note: this is a development baseline. It is not a production-hardened, enterprise-authenticated, or multi-tenant-isolated deployment.
+Note: this is a development baseline. It is not a hardened, fully-authenticated, or multi-tenant-isolated deployment.
 
 ---
 
