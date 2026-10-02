@@ -558,6 +558,92 @@ try:
                 request_id=request_id,
             )
 
+    # -----------------------------------------------------------------------
+    # R8: Manager approval page
+    # -----------------------------------------------------------------------
+
+    @bp.get("/manager")
+    def manager_page() -> Any:
+        """Serve the manager approval HTML page."""
+        import os as _os
+        html_path = _os.path.join(
+            _os.path.dirname(__file__),
+            "..",
+            "static",
+            "manager.html",
+        )
+        html_path = _os.path.normpath(html_path)
+        try:
+            with open(html_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            from flask import Response  # type: ignore
+            return Response(content, mimetype="text/html")
+        except FileNotFoundError:
+            return _response_error("manager.html not found", 404, code="NOT_FOUND")
+
+    # In-process approval store: run_id → approval status.
+    # Approval is set to "approved" only after a confirmed POST.
+    _approval_store: Dict[str, str] = {}
+
+    @bp.post("/manager/approve")
+    def manager_approve() -> Any:
+        """Set approval=approved for a run_id after confirming POST + auth."""
+        request_id = _new_request_id()
+
+        # Auth required — approve without a valid token returns 401.
+        auth_err = _check_auth(request_id)
+        if auth_err is not None:
+            return auth_err
+
+        try:
+            payload = request.get_json(silent=True) or {}
+            run_id = str(payload.get("run_id") or "").strip()
+            if not run_id:
+                return _response_error(
+                    "run_id is required to approve",
+                    400,
+                    code="MISSING_RUN_ID",
+                    request_id=request_id,
+                )
+            _approval_store[run_id] = "approved"
+            return _response_ok(
+                {
+                    "run_id": run_id,
+                    "approval": "approved",
+                },
+                request_id=request_id,
+            )
+        except Exception as e:
+            _log(f"manager_approve failed: {type(e).__name__}: {e}")
+            return _response_error(
+                "Failed to record approval",
+                500,
+                code="INTERNAL_ERROR",
+                request_id=request_id,
+            )
+
+    @bp.get("/manager/approval-status")
+    def manager_approval_status() -> Any:
+        """Return the current approval status for a run_id."""
+        request_id = _new_request_id()
+        auth_err = _check_auth(request_id)
+        if auth_err is not None:
+            return auth_err
+
+        run_id = (request.args.get("run_id") or "").strip()
+        if not run_id:
+            return _response_error(
+                "run_id query param is required",
+                400,
+                code="MISSING_RUN_ID",
+                request_id=request_id,
+            )
+        approval = _approval_store.get(run_id, "proposed")
+        return _response_ok(
+            {"run_id": run_id, "approval": approval},
+            request_id=request_id,
+        )
+
 except Exception as e:
     _log(f"Flask blueprint not available: {type(e).__name__}: {e}")
 

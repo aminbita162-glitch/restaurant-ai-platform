@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Manager — Daily Review</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    background: #f7f8fa;
+    color: #1f2328;
+    padding: 16px;
+    max-width: 600px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 1.2rem; font-weight: 700; margin-bottom: 4px; }
+  h2 { font-size: 0.95rem; font-weight: 600; margin: 16px 0 6px; color: #57606a; text-transform: uppercase; letter-spacing: 0.04em; }
+  .card {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 12px;
+  }
+  .date-line { font-size: 0.85rem; color: #57606a; margin-bottom: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  th { text-align: left; font-weight: 600; color: #57606a; border-bottom: 1px solid #e5e7eb; padding: 4px 6px; }
+  td { padding: 4px 6px; border-bottom: 1px solid #f0f0f0; }
+  tr:last-child td { border-bottom: none; }
+  .waste-total { font-size: 1.1rem; font-weight: 700; }
+  .waste-null { color: #57606a; font-style: italic; }
+  .approve-section { margin-top: 20px; }
+  #run-id-input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    font-size: 0.95rem;
+    margin-bottom: 10px;
+  }
+  #api-key-input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    font-size: 0.95rem;
+    margin-bottom: 10px;
+  }
+  #approve-btn {
+    width: 100%;
+    padding: 12px;
+    background: #3b82d4;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #approve-btn:disabled { background: #a0aec0; cursor: not-allowed; }
+  #status-msg {
+    margin-top: 10px;
+    font-size: 0.9rem;
+    padding: 8px 12px;
+    border-radius: 6px;
+    display: none;
+  }
+  #status-msg.ok { background: #d1fae5; color: #065f46; display: block; }
+  #status-msg.err { background: #fee2e2; color: #991b1b; display: block; }
+  .note { font-size: 0.8rem; color: #57606a; margin-top: 6px; }
+  #load-section { margin-bottom: 16px; }
+  #load-input {
+    width: calc(100% - 90px);
+    padding: 8px 10px;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    font-size: 0.9rem;
+  }
+  #load-btn {
+    width: 82px;
+    padding: 8px;
+    background: #1f2328;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    margin-left: 6px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Manager — Daily Review</h1>
+<p class="date-line" id="today-date">Loading date…</p>
+
+<div id="load-section" class="card">
+  <h2>Load last run</h2>
+  <p class="note" style="margin-bottom:8px;">Enter restaurant_id and location_id to load the last stored run payload. Authentication uses the X-Api-Key you supply below.</p>
+  <div style="display:flex;gap:0;align-items:center;margin-bottom:8px;">
+    <input id="load-rid" placeholder="restaurant_id" style="flex:1;padding:8px 10px;border:1px solid #e5e7eb;border-radius:6px 0 0 6px;font-size:0.9rem;">
+    <input id="load-lid" placeholder="location_id" style="flex:1;padding:8px 10px;border:1px solid #e5e7eb;border-left:none;border-radius:0 6px 6px 0;font-size:0.9rem;">
+  </div>
+  <div style="display:flex;align-items:center;">
+    <input id="load-apikey" type="password" placeholder="X-Api-Key" style="flex:1;padding:8px 10px;border:1px solid #e5e7eb;border-radius:6px;font-size:0.9rem;">
+    <button id="load-btn" onclick="loadLastRun()">Load</button>
+  </div>
+  <p id="load-msg" class="note" style="margin-top:6px;"></p>
+</div>
+
+<h2>Shift Blocks</h2>
+<div class="card">
+  <table id="shift-table">
+    <thead><tr><th>Start</th><th>End</th><th>Role</th><th>n</th></tr></thead>
+    <tbody><tr><td colspan="4" style="color:#57606a;font-style:italic;">No data loaded</td></tr></tbody>
+  </table>
+</div>
+
+<h2>Purchase List</h2>
+<div class="card">
+  <table id="purchase-table">
+    <thead><tr><th>Ingredient</th><th>Unit</th><th>On Hand</th><th>To Buy</th></tr></thead>
+    <tbody><tr><td colspan="4" style="color:#57606a;font-style:italic;">No data loaded</td></tr></tbody>
+  </table>
+</div>
+
+<h2>Waste Total</h2>
+<div class="card" id="waste-card">
+  <p class="waste-null">No data loaded</p>
+</div>
+
+<div class="approve-section card">
+  <h2>Approve</h2>
+  <p class="note" style="margin-bottom:10px;">Approval is recorded only after a confirmed POST. Approval status starts as <strong>proposed</strong>.</p>
+  <input id="run-id-input" placeholder="run_id to approve" type="text">
+  <input id="api-key-input" placeholder="X-Api-Key" type="password">
+  <button id="approve-btn" onclick="submitApproval()">Approve this run</button>
+  <div id="status-msg"></div>
+</div>
+
+<script>
+  // Set today's date display.
+  document.getElementById("today-date").textContent =
+    "Today: " + new Date().toLocaleDateString(undefined, { weekday:"long", year:"numeric", month:"long", day:"numeric" });
+
+  function loadLastRun() {
+    var rid = document.getElementById("load-rid").value.trim();
+    var lid = document.getElementById("load-lid").value.trim();
+    var key = document.getElementById("load-apikey").value.trim();
+    var msg = document.getElementById("load-msg");
+
+    if (!rid || !lid) { msg.textContent = "Enter restaurant_id and location_id."; return; }
+    if (!key) { msg.textContent = "Enter X-Api-Key."; return; }
+
+    msg.textContent = "Loading…";
+
+    // Use the last-run endpoint (GET, no side effects).
+    var url = "/api/v1/pipeline/last-run?restaurant_id=" + encodeURIComponent(rid) + "&location_id=" + encodeURIComponent(lid);
+    fetch(url, { headers: { "X-Api-Key": key } })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (!data.ok) {
+          msg.textContent = "Error: " + (data.error && data.error.message ? data.error.message : JSON.stringify(data));
+          return;
+        }
+        if (!data.has_last_run || !data.last_run) {
+          msg.textContent = "No run found for this tenant.";
+          return;
+        }
+        msg.textContent = "Loaded run: " + (data.last_run.run_id || "(no run_id)");
+        renderPayload(data.last_run);
+      })
+      .catch(function(e) { msg.textContent = "Fetch error: " + e; });
+  }
+
+  function renderPayload(run) {
+    // Shift blocks
+    var blocks = [];
+    if (run.staffing_plan && Array.isArray(run.staffing_plan)) {
+      blocks = run.staffing_plan;
+    } else if (run.manager_payload && run.manager_payload.staffing_blocks) {
+      blocks = run.manager_payload.staffing_blocks;
+    }
+    var stb = document.querySelector("#shift-table tbody");
+    if (blocks.length === 0) {
+      stb.innerHTML = "<tr><td colspan='4' style='color:#57606a;font-style:italic;'>No shift blocks</td></tr>";
+    } else {
+      stb.innerHTML = blocks.map(function(b) {
+        return "<tr><td>" + (b.start||"") + "</td><td>" + (b.end||"") + "</td><td>" + (b.role||"") + "</td><td>" + (b.n||0) + "</td></tr>";
+      }).join("");
+    }
+
+    // Purchase list
+    var items = [];
+    if (run.inventory_plan && Array.isArray(run.inventory_plan)) {
+      items = run.inventory_plan;
+    } else if (run.manager_payload && run.manager_payload.inventory_list) {
+      items = run.manager_payload.inventory_list;
+    }
+    var ptb = document.querySelector("#purchase-table tbody");
+    if (items.length === 0) {
+      ptb.innerHTML = "<tr><td colspan='4' style='color:#57606a;font-style:italic;'>No purchase items</td></tr>";
+    } else {
+      ptb.innerHTML = items.map(function(i) {
+        return "<tr><td>" + (i.ingredient||"") + "</td><td>" + (i.unit||"") + "</td><td>" + (i.on_hand!=null?i.on_hand:"—") + "</td><td>" + (i.suggested_purchase!=null?i.suggested_purchase:"—") + "</td></tr>";
+      }).join("");
+    }
+
+    // Waste total
+    var wc = document.getElementById("waste-card");
+    var wt = run.waste_total;
+    if (wt !== null && wt !== undefined) {
+      wc.innerHTML = "<p class='waste-total'>" + wt + " (measured)</p>";
+    } else {
+      wc.innerHTML = "<p class='waste-null'>No waste events recorded — total: null</p>";
+    }
+
+    // Pre-fill run_id in approve box
+    if (run.run_id) {
+      document.getElementById("run-id-input").value = run.run_id;
+    }
+  }
+
+  function submitApproval() {
+    var runId = document.getElementById("run-id-input").value.trim();
+    var apiKey = document.getElementById("api-key-input").value.trim();
+    var btn = document.getElementById("approve-btn");
+    var msg = document.getElementById("status-msg");
+
+    msg.className = "";
+    msg.style.display = "none";
+    msg.textContent = "";
+
+    if (!runId) { msg.className = "err"; msg.textContent = "Enter a run_id."; return; }
+    if (!apiKey) { msg.className = "err"; msg.textContent = "Enter X-Api-Key."; return; }
+
+    btn.disabled = true;
+
+    // Approval is set only via POST — never via GET.
+    fetch("/manager/approve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Api-Key": apiKey },
+      body: JSON.stringify({ run_id: runId })
+    })
+      .then(function(r) { return r.json().then(function(d) { return { status: r.status, data: d }; }); })
+      .then(function(res) {
+        btn.disabled = false;
+        if (res.status === 200 && res.data.ok) {
+          msg.className = "ok";
+          msg.textContent = "Approved — run " + runId + " is now approval=approved.";
+        } else {
+          msg.className = "err";
+          var errMsg = res.data.error ? res.data.error.message : JSON.stringify(res.data);
+          msg.textContent = "Error (" + res.status + "): " + errMsg;
+        }
+      })
+      .catch(function(e) { btn.disabled = false; msg.className = "err"; msg.textContent = "Network error: " + e; });
+  }
+</script>
+
+</body>
+</html>

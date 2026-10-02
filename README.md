@@ -208,7 +208,7 @@ Tenant-aware example:
 | Tenant API gate | Implemented | `X-Api-Key` required. `X-Tenant-Token` header maps token → tenant from env `TENANT_TOKENS` (`token:restaurant:location` pairs). Token present → body tenant ignored. Unknown token → 401. Tenant keys must not be defaulted. Per-tenant rate limit on `POST /pipeline/run`. |
 | AI output schema gate | Implemented | Invalid model JSON → `degraded` with `method=rule`; valid → `method=openai`. Raw text never passes as actions. |
 | Structured run logs | Implemented | Every log line includes `run_id`, `step`, `duration_ms`. |
-| Manager decision payload | Implemented | Compact payload with `approval=proposed`, `actions[]`, forecast/staffing/inventory/waste summary. |
+| Manager approval page | Implemented | `GET /manager` serves a mobile HTML page (shift blocks, purchase list, waste total, approve). `POST /manager/approve` sets `approval=approved` only after confirmed POST + `X-Api-Key`. No approval without auth (401). |
 | GPT insight generation | Experimental | Quality depends on external model. Schema-validated; degraded fallback when invalid. |
 | Forecast accuracy | Experimental | Heuristic (day-of-week average + 2% growth). Not a trained ML model. |
 | Staffing optimization | Experimental | Fixed ratio (1 per 600 sales). Not a constraint solver. |
