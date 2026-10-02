@@ -302,6 +302,16 @@ curl "http://localhost:8000/api/v1/pipeline/last-run?restaurant_id=demo_rest&loc
 
 ---
 
+## Public service
+
+| Endpoint | URL |
+|---|---|
+| Base | https://restaurant-ai-platform.onrender.com |
+| Health | https://restaurant-ai-platform.onrender.com/health |
+| Manager page | https://restaurant-ai-platform.onrender.com/manager |
+
+---
+
 ## Roadmap
 
 ### Phase 1
