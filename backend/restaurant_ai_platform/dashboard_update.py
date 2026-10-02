@@ -9,6 +9,7 @@ INVENTORY_ERROR_INVALID_BOM = "INVENTORY_INVALID_BOM"
 INVENTORY_ERROR_MISSING_ON_HAND = "INVENTORY_MISSING_ON_HAND"
 WASTE_ERROR_MISSING_INPUT = "WASTE_MISSING_INPUT"
 WASTE_ERROR_INVALID_INPUT = "WASTE_INVALID_INPUT"
+WASTE_ERROR_NO_EVENTS = "WASTE_NO_EVENTS_PROVIDED"
 
 # Waste ratio constant — rule, not a trained model.
 # Estimated food waste = 8 % of daily sales value.
@@ -86,6 +87,73 @@ def _weekly_waste_target(
         "target_pct": target_pct,
         "weekly_sales_basis": round(weekly_sales, 2),
         "weekly_waste_target": round(weekly_sales * target_pct, 2),
+    }
+
+
+def _process_waste_events(
+    waste_events: Any,
+) -> Dict[str, Any]:
+    """Process a waste_events list into a measured waste total.
+
+    Expected shape of each event:
+        {"item": str, "qty": float, "reason": str, "ts": str}
+
+    Returns a dict with:
+      - method: "measured" when events exist, null when absent
+      - waste_total: numeric sum of qty when events exist, null when absent
+      - waste_events: the validated event list, or None
+      - error_code: WASTE_NO_EVENTS_PROVIDED when absent, None otherwise
+
+    Do not invent kg from a sales ratio — if events are absent the total is null.
+    """
+    if waste_events is None or not isinstance(waste_events, list):
+        return {
+            "method": None,
+            "waste_total": None,
+            "waste_events": None,
+            "error_code": WASTE_ERROR_NO_EVENTS,
+        }
+
+    if len(waste_events) == 0:
+        return {
+            "method": None,
+            "waste_total": None,
+            "waste_events": [],
+            "error_code": WASTE_ERROR_NO_EVENTS,
+        }
+
+    # Validate and sum qty across events.
+    total = 0.0
+    validated: List[Dict[str, Any]] = []
+    for event in waste_events:
+        if not isinstance(event, dict):
+            return {
+                "method": None,
+                "waste_total": None,
+                "waste_events": None,
+                "error_code": WASTE_ERROR_INVALID_INPUT,
+            }
+        qty = event.get("qty")
+        if not isinstance(qty, (int, float)):
+            return {
+                "method": None,
+                "waste_total": None,
+                "waste_events": None,
+                "error_code": WASTE_ERROR_INVALID_INPUT,
+            }
+        total += float(qty)
+        validated.append({
+            "item": event.get("item"),
+            "qty": float(qty),
+            "reason": event.get("reason"),
+            "ts": event.get("ts"),
+        })
+
+    return {
+        "method": "measured",
+        "waste_total": round(total, 2),
+        "waste_events": validated,
+        "error_code": None,
     }
 
 
@@ -401,21 +469,16 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
     inventory_plan = _build_bom_inventory_plan(recipes, on_hand)
 
-    # C9: waste must be numeric from inputs or an error. Validate the same
-    # sales rows that feed the waste plan — no fake kg on missing inputs.
-    waste_error = _validate_waste_input(sales)
-    if waste_error is not None:
-        print(f"[{_utc_ts()}] dashboard_update waste status=error code={waste_error}")
-        return {
-            "status": "error",
-            "error_code": waste_error,
-            "restaurant_id": restaurant_id,
-            "location_id": location_id,
-            "timestamp": _utc_ts(),
-        }
-
-    waste_plan = _build_waste_plan(sales)
-    weekly_waste_target = _weekly_waste_target(sales, DEFAULT_WEEKLY_WASTE_TARGET_PCT)
+    # Waste total comes from waste_events only — do not invent kg from a sales ratio.
+    # If waste_events is absent, waste_total=null and method=null (not an invented ratio).
+    waste_events = context.get("waste_events")
+    waste_result = _process_waste_events(waste_events)
+    print(
+        f"[{_utc_ts()}] dashboard_update waste"
+        f" method={waste_result['method']}"
+        f" total={waste_result['waste_total']}"
+        f" error_code={waste_result['error_code']}"
+    )
 
     forecast = prediction_data.get("forecast", [])
     staffing_plan = optimization_data.get("staffing_plan", [])
@@ -438,29 +501,26 @@ def run(context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "forecast": forecast,
         "staffing_plan": staffing_plan,
         "inventory_plan": inventory_plan,
-        # C8: inventory is built from an explicit recipe/BOM, not a fixed ratio MRP.
+        # Inventory is built from an explicit recipe/BOM, not a fixed ratio MRP.
         "inventory_method": "bom_rule",
         "inventory_method_description": (
             "recipe/BOM: total_quantity = quantity_per_meal * expected_meals per ingredient"
         ),
-        "waste_plan": waste_plan,
-        # C9: waste is numeric from inputs with a weekly target. method=rule.
-        "waste_method": "rule",
-        "waste_method_description": (
-            f"fixed ratio: {WASTE_RATIO} estimated waste per sales unit"
-        ),
-        "weekly_waste_target": weekly_waste_target,
+        # Waste comes from measured events only.
+        "waste_method": waste_result["method"],
+        "waste_total": waste_result["waste_total"],
+        "waste_events": waste_result["waste_events"],
+        "waste_error_code": waste_result["error_code"],
         "gpt_insight_status": gpt_data.get("gpt_insight_status"),
         "insight_json": insight_json,
         "risk_level": risk_level,
         "actions": actions,
-        # C13: compact manager decision payload with approval=proposed.
         "manager_payload": _build_manager_payload(
             forecast=forecast,
             staffing_plan=staffing_plan,
             inventory_plan=inventory_plan,
-            waste_plan=waste_plan,
-            weekly_waste_target=weekly_waste_target,
+            waste_plan=[],
+            weekly_waste_target={},
             actions=actions,
             risk_level=risk_level,
         ),
