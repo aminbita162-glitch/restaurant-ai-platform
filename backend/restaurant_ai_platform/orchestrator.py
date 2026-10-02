@@ -8,6 +8,15 @@ import threading
 import os
 import inspect
 
+# ---------------------------------------------------------------------------
+# Stable error code returned when a Postgres job queue is required but
+# DATABASE_URL is not configured.
+# ---------------------------------------------------------------------------
+QUEUE_ERROR_NO_DATABASE = "QUEUE_NO_DATABASE"
+
+# DATABASE_URL presence is evaluated once at import time.
+_DATABASE_URL: Optional[str] = (os.getenv("DATABASE_URL") or "").strip() or None
+
 
 PIPELINE_ORDER: List[str] = [
     "real_data_ingestion",
@@ -41,7 +50,178 @@ def get_last_run() -> Optional[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Async job store — in-process only, no external queue required.
+# Postgres job queue helpers
+# ---------------------------------------------------------------------------
+
+def _pg_conn():  # type: ignore[return]
+    """Return a psycopg2 connection using DATABASE_URL."""
+    import psycopg2  # type: ignore
+    return psycopg2.connect(_DATABASE_URL)
+
+
+def _pg_init_jobs_table() -> None:
+    """Create pipeline_jobs table if it does not exist."""
+    conn = _pg_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pipeline_jobs (
+                id           SERIAL PRIMARY KEY,
+                job_id       TEXT NOT NULL UNIQUE,
+                status       TEXT NOT NULL DEFAULT 'queued',
+                queued_at    TEXT NOT NULL,
+                started_at   TEXT,
+                ended_at     TEXT,
+                restaurant_id TEXT,
+                location_id   TEXT,
+                options_json  TEXT NOT NULL,
+                result_json   TEXT,
+                error         TEXT
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_status"
+            " ON pipeline_jobs(status)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _pg_enqueue_job(job_id: str, options: Dict[str, Any]) -> None:
+    """Insert a new job row in the queued state."""
+    import json
+    _pg_init_jobs_table()
+    conn = _pg_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO pipeline_jobs
+            (job_id, status, queued_at, restaurant_id, location_id, options_json)
+            VALUES (%s, 'queued', %s, %s, %s, %s)
+            """,
+            (
+                job_id,
+                _utc_ts(),
+                str(options.get("restaurant_id") or ""),
+                str(options.get("location_id") or ""),
+                json.dumps(options, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _pg_claim_next_job() -> Optional[Tuple[str, Dict[str, Any]]]:
+    """Atomically claim one queued job. Returns (job_id, options) or None."""
+    import json
+    _pg_init_jobs_table()
+    conn = _pg_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE pipeline_jobs
+            SET status = 'running', started_at = %s
+            WHERE job_id = (
+                SELECT job_id FROM pipeline_jobs
+                WHERE status = 'queued'
+                ORDER BY id ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING job_id, options_json
+            """,
+            (_utc_ts(),),
+        )
+        row = cur.fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+
+    if row is None:
+        return None
+    try:
+        options = json.loads(row[1])
+    except Exception:
+        options = {}
+    return row[0], options
+
+
+def _pg_finish_job(
+    job_id: str,
+    status: str,
+    result: Optional[Dict[str, Any]] = None,
+    error: Optional[str] = None,
+) -> None:
+    """Mark a job done or error with result/error payload."""
+    import json
+    conn = _pg_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE pipeline_jobs
+            SET status = %s, ended_at = %s,
+                result_json = %s, error = %s
+            WHERE job_id = %s
+            """,
+            (
+                status,
+                _utc_ts(),
+                json.dumps(result, ensure_ascii=False) if result is not None else None,
+                error,
+                job_id,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _pg_get_job(job_id: str) -> Optional[Dict[str, Any]]:
+    """Return the job record dict for job_id from Postgres, or None."""
+    import json
+    _pg_init_jobs_table()
+    conn = _pg_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT job_id, status, queued_at, started_at, ended_at,"
+            "       restaurant_id, location_id, result_json, error"
+            "  FROM pipeline_jobs WHERE job_id = %s",
+            (job_id,),
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    result = None
+    if row[7]:
+        try:
+            result = json.loads(row[7])
+        except Exception:
+            pass
+    return {
+        "job_id": row[0],
+        "status": row[1],
+        "queued_at": row[2],
+        "started_at": row[3],
+        "ended_at": row[4],
+        "restaurant_id": row[5],
+        "location_id": row[6],
+        "result": result,
+        "error": row[8],
+    }
+
+
+# ---------------------------------------------------------------------------
+# In-process job store (used only when DATABASE_URL is absent — dev/test only).
 # ---------------------------------------------------------------------------
 
 _JOB_STORE_LOCK = threading.Lock()
@@ -54,57 +234,39 @@ def _job_store_set(job_id: str, record: Dict[str, Any]) -> None:
 
 
 def get_job(job_id: str) -> Optional[Dict[str, Any]]:
-    """Return the job record for job_id, or None if not found."""
+    """Return the job record for job_id.
+
+    When DATABASE_URL is set, reads from Postgres.
+    When DATABASE_URL is absent, reads from the in-process store.
+    """
+    if _DATABASE_URL:
+        return _pg_get_job(job_id)
     with _JOB_STORE_LOCK:
         return _JOB_STORE.get(job_id)
 
 
-def enqueue_job(options: Dict[str, Any]) -> str:
-    """Enqueue a pipeline run as a background thread.
+def enqueue_job(options: Dict[str, Any]) -> Any:
+    """Enqueue a pipeline run.
 
-    Returns a job_id immediately (202 pattern). The pipeline runs in a daemon
-    thread; the caller must not block on its completion inside the request.
-    The job record is retrievable via get_job(job_id).
+    When DATABASE_URL is set, the job is written to the Postgres pipeline_jobs
+    table and returned immediately. The worker process claims and executes it.
+    No thread is spawned — the API process does not execute the pipeline.
+
+    When DATABASE_URL is absent, returns an error dict with
+    error_code=QUEUE_NO_DATABASE. The in-process memory queue is not a
+    substitute for a separate worker process.
     """
+    if not _DATABASE_URL:
+        return {
+            "error_code": QUEUE_ERROR_NO_DATABASE,
+            "message": (
+                "DATABASE_URL is not set. A Postgres job queue is required "
+                "to run the worker as a separate process."
+            ),
+        }
+
     job_id = f"job_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
-
-    record: Dict[str, Any] = {
-        "job_id": job_id,
-        "status": "queued",
-        "queued_at": _utc_ts(),
-        "started_at": None,
-        "ended_at": None,
-        "restaurant_id": options.get("restaurant_id", ""),
-        "location_id": options.get("location_id", ""),
-    }
-    _job_store_set(job_id, record)
-
-    def _worker() -> None:
-        started = _utc_ts()
-        _job_store_set(job_id, {**_JOB_STORE.get(job_id, record), "status": "running", "started_at": started})
-        try:
-            result = run_pipeline(options)
-            ended = _utc_ts()
-            _job_store_set(job_id, {
-                **_JOB_STORE.get(job_id, {}),
-                "status": "done",
-                "started_at": started,
-                "ended_at": ended,
-                "result": result,
-            })
-        except Exception as e:
-            ended = _utc_ts()
-            _job_store_set(job_id, {
-                **_JOB_STORE.get(job_id, {}),
-                "status": "error",
-                "started_at": started,
-                "ended_at": ended,
-                "error": f"{type(e).__name__}: {e}",
-            })
-
-    t = threading.Thread(target=_worker, daemon=True, name=f"pipeline-job-{job_id}")
-    t.start()
-
+    _pg_enqueue_job(job_id, options)
     return job_id
 
 

@@ -1,20 +1,20 @@
-"""Worker entrypoint — executes queued pipeline jobs.
+"""Worker entrypoint — executes queued pipeline jobs from Postgres.
 
 Run this process separately from the API server:
 
     python worker.py
 
-The worker drains the in-process job queue produced by
-orchestrator.enqueue_job(). Each queued job calls run_pipeline()
-in this process, not inside the API request handler.
+When DATABASE_URL is set, the worker claims jobs from the Postgres
+pipeline_jobs table (written by enqueue_job) and executes them.
+This is the only supported mode for a live restaurant deployment.
 
-Environment variables used (same as the API server):
-  DATABASE_URL           Optional Postgres URL for run persistence.
-  RESTAURANT_AI_API_KEY  Not needed by the worker directly.
+When DATABASE_URL is unset, run_once() returns 0 and logs a warning.
+The in-process memory queue is not a cross-process worker substitute.
+
+Environment variables:
+  DATABASE_URL           Required for live use. Postgres connection URL.
+  WORKER_POLL_INTERVAL_S Poll interval in seconds (default: 1).
   OPENAI_API_KEY         Required only if gpt_insight step is enabled.
-
-Note: the current job store is in-process memory shared via import.
-For multi-process deployments a shared queue (e.g. Redis) is required.
 """
 from __future__ import annotations
 
@@ -32,48 +32,34 @@ _POLL_INTERVAL_S = float(os.environ.get("WORKER_POLL_INTERVAL_S", "1"))
 
 
 def run_once() -> int:
-    """Drain all jobs currently in the QUEUED state. Return count processed."""
+    """Claim and execute one batch of queued jobs. Return count processed.
+
+    When DATABASE_URL is set, claims jobs atomically from Postgres.
+    When DATABASE_URL is unset, logs a warning and returns 0.
+    """
+    if not orchestrator._DATABASE_URL:
+        print(
+            "[worker] DATABASE_URL is not set — no Postgres job queue available."
+            " Set DATABASE_URL to enable cross-process job execution.",
+            flush=True,
+        )
+        return 0
+
     processed = 0
-    with orchestrator._JOB_STORE_LOCK:
-        job_ids = list(orchestrator._JOB_STORE.keys())
+    while True:
+        claimed = orchestrator._pg_claim_next_job()
+        if claimed is None:
+            break
 
-    for job_id in job_ids:
-        record = orchestrator.get_job(job_id)
-        if record is None:
-            continue
-        if record.get("status") != "queued":
-            continue
-
-        # Mark running before executing so a second worker won't double-run.
-        started_at = orchestrator._utc_ts()
-        orchestrator._job_store_set(job_id, {
-            **record,
-            "status": "running",
-            "started_at": started_at,
-        })
-
-        options = {k: v for k, v in record.items()
-                   if k not in {"job_id", "status", "queued_at", "started_at", "ended_at"}}
+        job_id, options = claimed
 
         try:
             result = orchestrator.run_pipeline(options)
-            ended_at = orchestrator._utc_ts()
-            orchestrator._job_store_set(job_id, {
-                **orchestrator._JOB_STORE.get(job_id, {}),
-                "status": "done",
-                "started_at": started_at,
-                "ended_at": ended_at,
-                "result": result,
-            })
+            orchestrator._pg_finish_job(job_id, "done", result=result)
         except Exception as exc:
-            ended_at = orchestrator._utc_ts()
-            orchestrator._job_store_set(job_id, {
-                **orchestrator._JOB_STORE.get(job_id, {}),
-                "status": "error",
-                "started_at": started_at,
-                "ended_at": ended_at,
-                "error": f"{type(exc).__name__}: {exc}",
-            })
+            orchestrator._pg_finish_job(
+                job_id, "error", error=f"{type(exc).__name__}: {exc}"
+            )
 
         processed += 1
 
@@ -82,6 +68,12 @@ def run_once() -> int:
 
 def main() -> None:
     print(f"[worker] starting, poll_interval={_POLL_INTERVAL_S}s", flush=True)
+    if not orchestrator._DATABASE_URL:
+        print(
+            "[worker] WARNING: DATABASE_URL is not set."
+            " Worker will poll but cannot claim jobs.",
+            flush=True,
+        )
     while True:
         count = run_once()
         if count:

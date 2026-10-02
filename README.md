@@ -198,7 +198,7 @@ Tenant-aware example:
 |---|---|---|
 | Data ingestion (CSV, tenant-scoped) | Implemented | Required row fields: `date`, `net_sales`, `restaurant_id`, `location_id`. Missing field → `DATA_INGESTION_MISSING_REQUIRED_FIELD`. No silent fill. DEMO only with `demo=true`. |
 | Pipeline orchestrator (step selection, dry-run) | Implemented | Async job enqueue via `POST /pipeline/run` (202 + job_id). `GET /pipeline/run` does not execute. |
-| Worker entrypoint (`backend/worker.py`) | Implemented | Standalone process that executes queued jobs. Run separately from the API server (`python worker.py`). |
+| Worker entrypoint (`backend/worker.py`) | Implemented | When `DATABASE_URL` is set, claims jobs atomically from Postgres `pipeline_jobs` table. Without `DATABASE_URL`, returns `QUEUE_NO_DATABASE` — in-memory queue is not a cross-process substitute. |
 | Postgres persistence (optional) | Implemented | When `DATABASE_URL` is set; SQLite local-only otherwise. Tenant-scoped. |
 | Day-of-week sales forecast | Implemented | `method=dow_heuristic`; 7-day horizon from weekday buckets. Thin history (<7 rows) errors. |
 | Backtest quality gate | Implemented | Hold-out MAPE; `labor_recommendation_allowed=false` when MAPE > 50% or insufficient history. |
