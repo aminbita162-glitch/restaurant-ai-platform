@@ -1,395 +1,224 @@
-RESTAURANT AI PLATFORM — MASTER DIRECTIVE
-========================================
+RESTAURANT AI PLATFORM — COMMERCIAL COMPLETION DIRECTIVE
+======================================================
 Status: LOCKED FOR AGENT EXECUTION
 Language of this file: English
-Language of agent reports to the human owner: Persian
-Owner / Author: Amin Azimi, AI Architect
-Entities: Amin Azimi and System Development, Business Challenge
+Language of agent reports to the owner: Persian
+Owner: Amin Azimi, AI Architect
 Lab: Azimi Innovation Lab
 Repository: restaurant-ai-platform
-Default branch: main
-Date locked: 2026-09-29
-Target label when ALL release gates pass: v1.0.0-ops-baseline
-This file is the authority for future work.
-Completed PHASE 0 through PHASE 13 remains in the repository.
-Do not rewrite that history. Do not reopen a finished phase unless the owner names it.
+Branch: main
+Date locked: 2026-10-02
+This file is the only authority for the next work.
+Completed C0–C15 stays in history. Do not reopen it unless the owner names it.
+Do not tag v1.0.0-ops-baseline until section 6 gates are green.
 
 0. PURPOSE
 ----------
-This file is the only authority for development work performed by the coding
-agent ("Agent Bob"). If a task is not written here, the agent must not do it.
+Move the backend ops-baseline to an installable commercial operations core.
+Order is fixed. Do not reorder phases.
 
-Product target: restaurant operations intelligence for labor/shift planning,
-inventory, and measured food waste. Not an ordering chatbot.
+1. HARD LOCKS
+-------------
+MUST:
+- Read this file before every phase.
+- Work only on the active phase the owner names.
+- Test that phase, commit, then stop and ask permission for the next phase.
+- Push only if git remote accepts the owner account aminbita162-glitch.
+  If push returns 403, stop and report. Do not switch accounts.
+- Reports in Persian. Code, commits, comments in English.
+- Honest method labels. No invented numbers.
 
-Release is forbidden until the gates in section 11 are green.
-Correctness before sophistication.
-
-Three product columns required for Release 1.0:
-  A) Defensible demand forecast + wall-installable shift plan
-  B) Inventory and purchasing from recipes (BOM), not a fixed ratio
-  C) Measured food waste with a numeric weekly target
-
-1. HARD LOCKS (NON-NEGOTIABLE)
-------------------------------
-The agent MUST:
-- Read this file before every session and before every phase.
-- Work only on the single active phase named by the owner.
-- Stop at the end of that phase and wait for explicit permission.
-- Speak to the owner in Persian; keep code, commits, comments, and this file
-  in English.
-- Be honest. Never claim a capability that the current code does not implement.
-- Preserve existing files unless the active phase explicitly lists a change.
-- Keep method labels honest.
-
-The agent MUST NOT:
-- Delete any file or folder without a one-line written approval in chat.
-- Edit files outside the Allowed files list of the active phase.
-- Invent extra features, refactors, or improvements not requested.
-- Overwrite README with marketing language or unproven production claims.
-- Run the full product pipeline as a side effect of documentation work.
-- Commit secrets, .env files, API keys, or real customer data.
-- Start the next phase without the owner saying the next phase is approved.
-- Rewrite git history.
-- Force-push.
-- Call a ratio rule an optimizer, MRP, or trained model.
-- Silently fall back to synthetic or demo data.
-- Invent restaurant_001 / location_001 when the caller omitted tenant keys.
+MUST NOT:
+- Delete any file without a one-line owner approval.
+- Edit files outside the active phase Allowed files list.
+- Invent features, refactors, or extra phases.
+- Claim production-ready, enterprise-ready, or million-tenant proven.
+- Commit secrets, .env, API keys, or customer data.
+- Force-push or rewrite git history.
+- Silently fall back to synthetic data.
+- Invent restaurant_001 or location_001.
 - Re-enable side-effecting GET /pipeline/run.
-
-If anything is ambiguous, the agent must stop and ask one precise question.
+- Start the next phase before the owner says it is approved.
 
 2. PHASE COMPLETION RULE
 ------------------------
-For every approved phase the agent must, in order:
 1) Implement only the listed work.
-2) Run the tests defined for THAT phase.
-3) Show a short Persian report: files touched, what changed, what was not done.
-4) Create a git commit with the message specified.
-5) Do not push. The owner pushes from GitHub Desktop.
-6) Stop. Ask permission for the next phase.
+2) Run the tests for that phase.
+3) If a user-visible behavior changed, add one honest line to README.md
+   under the existing matrix. No marketing.
+4) Commit with the specified message.
+5) Push origin main. On 403, stop and report.
+6) Persian report: files, tests, commit hash, push result.
+7) Stop. Ask permission for the next phase.
 
-Do not batch multiple phases.
-Do not implement a phase that is not yet written in section 8.
+3. CURRENT TRUTH
+----------------
+Ops-baseline backend. Heuristic forecast. Ratio shift blocks. BOM only if
+recipes are supplied. Waste is a ratio, not events. API key is not a tenant
+token. No manager UI. SQLite on ephemeral disk is not authoritative.
 
-3. CURRENT TRUTH (DO NOT UPGRADE WITHOUT EVIDENCE)
---------------------------------------------------
-- Flask + Gunicorn + local CSV + SQLite/file persistence.
-- Forecast is heuristic. method=heuristic unless a later phase changes it.
-- Labor is a sales/600 rule. method=rule. Not a constraint optimizer.
-- Inventory has been a ratio rule, not MRP.
-- Waste is a rule field, not a measured event store.
-- Pipeline still runs inside the HTTP request until C3.
-- SQLite on ephemeral disk is not authoritative on Render.
-- X-Api-Key exists on some routes. That is not token-bound tenant isolation.
-- Smoke CI exists. It is not an enterprise suite.
-- There is no product frontend.
-- GET /pipeline/run must not execute the pipeline.
-
-4. HONESTY POLICY
------------------
-README may contain accurate current capabilities, a future-tense plan,
-the author block, and after C14 a matrix Implemented / Experimental / Planned.
-README may not contain production ready, enterprise ready, or million-tenant
-proven until section 11 gates pass.
-README may not contain GET examples that execute the pipeline.
-
-Author:
-  Amin Azimi — AI Architect
-  Amin Azimi and System Development
-  Business Challenge
-  Azimi Innovation Lab
-
-5. LICENSE
-----------
-MIT. Copyright (c) 2026 Amin Azimi / Azimi Innovation Lab
-Do not switch to GPL.
-
-6. CODE REGENERATION
---------------------
-Later. If a versioned artifact exists, do not regenerate it with an LLM.
-Do not build the in-product registry in C0-C3.
-
-7. ERROR RULE
--------------
-Public errors use stable codes. No raw traceback to clients.
-Do not log API keys.
-
-8. PHASE MAP
+4. PHASE MAP
 ------------
 
-PHASE C0 — FREEZE CONTRACTS
-Allowed files:
-- docs/CONTRACTS.md
-Work:
-- Create docs/CONTRACTS.md describing current pipeline steps, public error
-  codes, tenant keys, sales input, forecast output, labor output, inventory
-  output, waste output, and AI output as they exist today.
-- Future notes only in a section labeled FUTURE.
-- Do not change product code.
-Tests:
-- File exists at docs/CONTRACTS.md.
-- File lists current public error-code names already in code.
-Commit message: docs: freeze current contracts
-
-PHASE C1 — DATA CONTRACT
-Allowed files:
-- backend/restaurant_ai_platform/data_ingestion.py
-Work:
-- Reject invalid sales rows with a stable error code.
-- Require source_type REAL or DEMO. DEMO only when demo=true.
-- Do not restore silent synthetic fallback.
-Tests:
-- Invalid or empty non-demo CSV returns a stable error.
-- demo=true is the only sample path.
-Commit message: fix: sales data contract
-
-PHASE C2 — POSTGRES PERSISTENCE
+PHASE R1 — LIVE POSTGRES
 Allowed files:
 - backend/restaurant_ai_platform/core/persistence.py
 - backend/restaurant_ai_platform/persistence.py
 - backend/requirements.txt
-Work:
-- When DATABASE_URL is set, use Postgres for pipeline runs.
-- Keep tenant scope on restaurant_id and location_id.
-- SQLite may remain local-only when DATABASE_URL is absent.
-Tests:
-- get_last_run without tenant keys returns PERSISTENCE_MISSING_TENANT_KEYS.
-- save then read for tenant A does not return tenant B.
-Commit message: feat: optional Postgres persistence
-
-PHASE C3 — ASYNC JOB
-Allowed files:
-- backend/restaurant_ai_platform/api_serving.py
-- backend/restaurant_ai_platform/orchestrator.py
-Work:
-- POST /pipeline/run must not run the full pipeline inside the request
-  when async mode is implemented.
-- Return 202 with a job id.
-- GET /pipeline/run must never create a job.
-Tests:
-- GET /pipeline/run does not enqueue or execute.
-- POST without tenant keys or without API key still fails closed.
-Commit message: feat: async pipeline job
-
-PHASE C4 — ONE FORECAST ARTIFACT
-Allowed files:
-- backend/restaurant_ai_platform/optimization.py
-- backend/restaurant_ai_platform/dashboard_update.py
-- backend/restaurant_ai_platform/gpt_insight.py
-Work:
-- Downstream steps must read the forecast already on the context artifact.
-- Downstream steps must not import and rerun ml_prediction.
-Tests:
-- optimization.py does not call ml_prediction.run.
-Commit message: fix: single forecast artifact
-
-PHASE C5 — DAY-OF-WEEK FORECAST
-Allowed files:
-- backend/restaurant_ai_platform/ml_prediction.py
-Work:
-- Use day-of-week buckets when dates exist.
-- method must be dow_heuristic until a trained model exists.
-- Fewer than 7 valid daily totals remains an error.
-Tests:
-- Thin history returns FORECAST_INSUFFICIENT_DATA or equivalent.
-- Successful heuristic sets method=dow_heuristic, never ml_model.
-Commit message: feat: day-of-week forecast
-
-PHASE C6 — BACKTEST GATE
-Allowed files:
-- backend/restaurant_ai_platform/ml_prediction.py
-- backend/restaurant_ai_platform/optimization.py
-Work:
-- Record a simple MAPE when enough history exists.
-- If quality is below a documented threshold, labor_recommendation_allowed=false.
-Tests:
-- Payload exposes labor_recommendation_allowed.
-Commit message: feat: forecast backtest gate
-
-PHASE C7 — BLOCK SHIFT PLANNER
-Allowed files:
-- backend/restaurant_ai_platform/optimization.py
-Work:
-- Emit 2-hour blocks and at least one role field.
-- Keep method=rule until a real solver exists.
-- Missing forecast/sales still errors. Do not invent headcount.
-Tests:
-- Output blocks have start, end, role, n.
-- method remains rule.
-Commit message: feat: block shift planner
-
-PHASE C8 — BOM INVENTORY
-Allowed files:
-- backend/restaurant_ai_platform/dashboard_update.py
-Work:
-- Inventory suggestions must use an explicit recipe/BOM structure or return
-  status=error. Do not call a fixed ratio MRP.
-- method=bom_rule or method=rule with an honest description.
-Tests:
-- Missing item/recipe input errors instead of inventing kg quantities.
-- No field claims MRP.
-Commit message: feat: bom inventory rule
-
-PHASE C9 — WASTE EVENTS
-Allowed files:
-- backend/restaurant_ai_platform/dashboard_update.py
-Work:
-- Waste must be numeric from inputs or an error.
-- Include method=rule and a weekly target field.
-- Do not invent waste events.
-Tests:
-- Missing inputs return a stable error and no fake kg.
-Commit message: feat: waste numeric contract
-
-PHASE C10 — TENANT TOKEN GATE
-Allowed files:
-- backend/restaurant_ai_platform/api_serving.py
-Work:
-- Keep X-Api-Key. Do not weaken it.
-- Do not invent a full IdP.
-- Tenant ids must not be defaulted.
-- Simple in-process rate limit on POST /pipeline/run per tenant if possible
-  in this file without new infrastructure.
-Tests:
-- Missing or wrong key still 401/503 as in PHASE 7.
-- Missing tenant keys still do not run the pipeline.
-Commit message: feat: tighten tenant API gate
-
-PHASE C11 — AI OUTPUT SCHEMA
-Allowed files:
-- backend/restaurant_ai_platform/gpt_insight.py
-Work:
-- If model output is not valid JSON with required keys, return a stable
-  error or a rule-based degraded insight labeled method=rule.
-- Do not send raw model text as the business action list.
-Tests:
-- Invalid model-shaped output does not pass as ok actions.
-Commit message: feat: ai output schema gate
-
-PHASE C12 — OBSERVABILITY
-Allowed files:
-- backend/restaurant_ai_platform/orchestrator.py
-- .github/workflows/ci.yml
-- backend/tests/test_fail_closed.py
-Work:
-- Structured log lines must include run_id and step and duration_ms.
-- Keep smoke CI.
-Tests:
-- Existing fail-closed tests still pass.
-Commit message: feat: structured run logs
-
-PHASE C13 — MANAGER PAYLOAD
-Allowed files:
-- backend/restaurant_ai_platform/dashboard_update.py
-Work:
-- Add a compact manager payload: forecast summary, staffing blocks, inventory
-  list, waste number, actions[], approval=proposed.
-- Do not build a frontend app in this phase.
-Tests:
-- Payload contains approval=proposed and actions as a list.
-Commit message: feat: manager decision payload
-
-PHASE C14 — README HONESTY MATRIX
-Allowed files:
 - README.md
 Work:
-- Add Implemented / Experimental / Planned matrix.
-- Remove any GET execute example.
-- Keep author block.
-- Do not claim Release 1.0 until section 11 gates are green.
+- When DATABASE_URL is set, pipeline runs persist in Postgres.
+- Tenant scope remains restaurant_id + location_id.
+- Missing tenant keys still return PERSISTENCE_MISSING_TENANT_KEYS.
+- Do not create a Render database. Document the env var only.
 Tests:
-- README has no production-ready / enterprise-ready / million-tenant proven.
-Commit message: docs: honest capability matrix
+- Tenant A read does not return tenant B.
+- Missing keys do not return a global last run.
+Commit: feat: live Postgres when DATABASE_URL set
 
-PHASE C15 — DEMO INSTALL PACK
+PHASE R2 — SEPARATE WORKER
 Allowed files:
-- data/DEMO_README.md
-- data/demo_sales.csv
+- backend/restaurant_ai_platform/orchestrator.py
+- backend/restaurant_ai_platform/api_serving.py
+- backend/worker.py
+- README.md
 Work:
-- Label demo files DEMO in the name or header.
-- Do not overwrite production ingestion defaults to this file.
+- POST /pipeline/run returns 202 and a job id. It does not run the pipeline
+  in the request process.
+- A worker entrypoint executes queued jobs.
+- GET /pipeline/run never creates or runs a job.
 Tests:
-- Demo file header or name contains DEMO.
-Commit message: docs: demo install pack
+- POST does not call the pipeline inline.
+- GET /pipeline/run has no side effect.
+Commit: feat: separate pipeline worker
 
-PHASE C16+ — only after owner approval
-Do not invent C16.
+PHASE R3 — SALES DATA CONTRACT
+Allowed files:
+- backend/restaurant_ai_platform/data_ingestion.py
+- docs/CONTRACTS.md
+- README.md
+Work:
+- Required fields when present in a row: date, net sales, restaurant_id,
+  location_id. Optional: channel, orders, guests, currency.
+- Invalid rows return a stable error. No silent synthetic fill.
+- demo=true remains the only demo path.
+Tests:
+- Missing required field errors.
+- demo=false does not load sample sales.
+Commit: feat: sales row contract
 
-9. GIT RULES
-------------
-- Working branch: main unless the owner names another.
-- Do not force-push.
-- One commit per phase unless the owner asks otherwise.
-- Do not push. Owner pushes from GitHub Desktop with aminbita162-glitch.
-- Do not add aminazimi42-coder as a collaborator.
+PHASE R4 — PRINTABLE SHIFT
+Allowed files:
+- backend/restaurant_ai_platform/optimization.py
+- README.md
+Work:
+- 2-hour blocks with role, start, end, n.
+- Roles limited to cook, floor, cashier unless the caller supplies a role list.
+- Include estimated_labor_cost only if hourly_cost is supplied. Do not invent wages.
+- method stays rule. approval stays proposed.
+- If labor_recommendation_allowed is false, return no staff list and a stable code.
+Tests:
+- Blocks have start, end, role, n.
+- No optimizer claim.
+- Disallowed labor returns no invented headcount.
+Commit: feat: printable shift blocks
 
-10. THIRTY MERGE FILTERS
-------------------------
-F01 Input data contract is valid or the step errors.
-F02 source_type is explicit when data is produced.
-F03 demo is off unless demo=true.
-F04 Tenant keys are required on protected routes.
-F05 GET has no side effects.
-F06 Heavy work is async once C3 is implemented.
-F07 One forecast artifact after C4.
-F08 method matches the algorithm.
-F09 Thin data errors. No invented numbers.
-F10 Quality/MAPE recorded after C6.
-F11 Shifts have role and block after C7.
-F12 Inventory is BOM or honestly labeled rule.
-F13 Waste is numeric or an error.
-F14 Invalid AI output is rejected or degraded with method=rule.
-F15 Logs can carry request_id / run_id.
-F16 Secrets are not logged.
-F17 Tests for THAT phase are green.
-F18 README matches code after C14.
-F19 Do not fake a token cost cap.
-F20 Tenant-scoped last run remains true.
-F21 Do not fake freshness hours.
-F22 approval=proposed after C13.
-F23 Persistence changes keep tenant columns.
-F24 Do not claim readiness probes until implemented.
-F25 Public errors use codes, not tracebacks.
-F26 New module names must not overclaim.
-F27 Tenant A data is not returned for tenant B.
-F28 Demo files are labeled DEMO.
-F29 Manager payload is readable after C13.
-F30 Owner approved the phase.
+PHASE R5 — BOM WITH ON HAND
+Allowed files:
+- backend/restaurant_ai_platform/dashboard_update.py
+- README.md
+Work:
+- Suggested purchase = recipe qty * expected meals - on_hand, never below zero.
+- If recipe or on_hand is missing, return a stable error. Do not invent kg.
+- method=bom_rule. No MRP claim.
+Tests:
+- Missing recipe errors.
+- on_hand reduces suggested qty.
+Commit: feat: bom purchase from on-hand
 
-11. RELEASE GATES
------------------
-Do not tag v1.0.0-ops-baseline until all are green:
-D1 Data schema + demo only with demo=true
-D2 POST run creates a job after C3
-D3 Postgres when DATABASE_URL set
-D4 Day-of-week forecast + named method + backtest field
-D5 Block shifts with roles
-D6 Inventory from BOM or honest error
-D7 Waste numeric + target field
-D8 Auth gate + tenant keys
-D9 Structured logs with run_id
-D10 Fail-closed tests + GET does not execute
-D11 Honest README matrix
-D12 Demo pack labeled DEMO
+PHASE R6 — WASTE EVENTS
+Allowed files:
+- backend/restaurant_ai_platform/dashboard_update.py
+- README.md
+Work:
+- Accept a waste_events list: item, qty, reason, ts.
+- If absent, return a stable error or an explicit empty measured total of null.
+  Do not invent kg from a sales ratio.
+- method=measured when events exist.
+Tests:
+- No events does not invent kg.
+- Events sum to a numeric total.
+Commit: feat: measured waste events
 
-12. AFTER R1
-------------
-Deep models without hold-out.
-Industrial shift solver.
-Million-tenant isolated cells.
-Full multi-role SaaS frontend.
-Every Iranian POS live connector.
-Dynamic pricing and CRM.
+PHASE R7 — TENANT FROM TOKEN
+Allowed files:
+- backend/restaurant_ai_platform/api_serving.py
+- README.md
+Work:
+- Keep X-Api-Key.
+- Add header X-Tenant-Token. Map token to restaurant_id and location_id
+  from env TENANT_TOKENS as token:restaurant:location pairs.
+- Ignore body tenant ids when a token is present.
+- Missing or unknown token returns 401. Do not default a tenant.
+Tests:
+- Unknown token does not run the pipeline.
+- Body tenant cannot override the token tenant.
+Commit: feat: tenant from token
 
-13. FIRST COMMAND TO THE AGENT
-------------------------------
+PHASE R8 — MANAGER APPROVAL PAGE
+Allowed files:
+- backend/restaurant_ai_platform/api_serving.py
+- backend/static/manager.html
+- README.md
+Work:
+- One mobile page: today, shift blocks, purchase list, waste total, approve.
+- Approve sets approval=approved only after a confirmed POST.
+- No new product claims.
+Tests:
+- Page exists and does not call GET /pipeline/run.
+- Approve without token returns 401.
+Commit: feat: manager approval page
+
+PHASE R9 — INSTALL PACK HONESTY
+Allowed files:
+- README.md
+- data/DEMO_README.md
+Work:
+- README matrix matches the code after R1–R8.
+- 30-day install steps use demo=true and say Postgres and worker are required
+  for a live restaurant.
+- No release tag.
+Tests:
+- README has no production-ready, enterprise-ready, or million-tenant proven.
+Commit: docs: commercial install honesty
+
+PHASE R10+ — only after owner approval
+Do not invent R10.
+
+5. GIT
+------
+Push account: aminbita162-glitch only.
+Do not add aminazimi42-coder.
+
+6. RELEASE GATES
+----------------
+Do not tag until all are true in the running service, not only in code:
+G1 DATABASE_URL Postgres holds last-run across restart
+G2 Worker process executes jobs
+G3 Invalid sales row errors
+G4 Shift blocks are printable and proposed
+G5 Purchase uses recipe and on_hand
+G6 Waste total comes from events
+G7 Tenant comes from token
+G8 Manager page can approve
+G9 README matches code
+
+7. FIRST COMMAND
+----------------
 Read DIRECTIVE.txt.
-You are Agent Bob.
 Active phase: wait.
 Do not edit any file.
-Reply in Persian with: (1) that you read the directive, (2) the hard locks
-you will obey, (3) that you are waiting for the owner to name PHASE C0
-or another written phase.
+Reply in Persian: confirm you read this file, list the hard locks,
+and wait for the owner to name PHASE R1.
 
 END OF DIRECTIVE
