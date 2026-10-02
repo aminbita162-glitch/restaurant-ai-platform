@@ -196,7 +196,7 @@ Tenant-aware example:
 
 | Capability | Status | Notes |
 |---|---|---|
-| Data ingestion (CSV, tenant-scoped) | Implemented | Rejects invalid rows with stable error codes. DEMO only with `demo=true`. |
+| Data ingestion (CSV, tenant-scoped) | Implemented | Required row fields: `date`, `net_sales`, `restaurant_id`, `location_id`. Missing field → `DATA_INGESTION_MISSING_REQUIRED_FIELD`. No silent fill. DEMO only with `demo=true`. |
 | Pipeline orchestrator (step selection, dry-run) | Implemented | Async job enqueue via `POST /pipeline/run` (202 + job_id). `GET /pipeline/run` does not execute. |
 | Worker entrypoint (`backend/worker.py`) | Implemented | Standalone process that executes queued jobs. Run separately from the API server (`python worker.py`). |
 | Postgres persistence (optional) | Implemented | When `DATABASE_URL` is set; SQLite local-only otherwise. Tenant-scoped. |

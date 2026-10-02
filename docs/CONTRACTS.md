@@ -126,17 +126,41 @@ CSV file resolved per tenant. Resolution order:
 
 If no file exists, `DATA_INGESTION_FILE_NOT_FOUND` is returned.
 
-Required columns (per row):
+### Required columns (per row)
 
-| Column              | Type    | Notes                                   |
-|---------------------|---------|-----------------------------------------|
-| `date`              | string  | ISO date recommended; not validated yet |
-| `daily_sales_total` | float   | Must be numeric                         |
-| `restaurant_id`     | string  | Optional in CSV; falls back to context  |
-| `location_id`       | string  | Optional in CSV; falls back to context  |
+All four fields below must be present and non-empty on every row.
+A missing or invalid required field returns `DATA_INGESTION_MISSING_REQUIRED_FIELD`
+with a `missing_field` key naming the first offending field. No silent fill.
+
+| Column          | Type   | Notes                                                   |
+|-----------------|--------|---------------------------------------------------------|
+| `date`          | string | Non-empty. ISO date recommended; format not enforced.   |
+| `net_sales`     | float  | Must be numeric and non-empty.                          |
+| `restaurant_id` | string | Must be non-empty. Never defaulted from context.        |
+| `location_id`   | string | Must be non-empty. Never defaulted from context.        |
+
+### Optional columns (per row)
+
+Present and non-empty values are carried through; absent fields are omitted.
+
+| Column     | Type   | Notes                     |
+|------------|--------|---------------------------|
+| `channel`  | string | e.g. dine-in, delivery    |
+| `orders`   | string | order count               |
+| `guests`   | string | guest/cover count         |
+| `currency` | string | ISO 4217 code recommended |
 
 Demo mode: caller must explicitly pass `demo=true` in context. The agent
 must never silently fall back to synthetic data.
+
+### Error codes (data ingestion)
+
+| Code                                    | Meaning                                                                  |
+|-----------------------------------------|--------------------------------------------------------------------------|
+| `DATA_INGESTION_FILE_NOT_FOUND`         | Tenant CSV file does not exist on disk                                   |
+| `DATA_INGESTION_MISSING_REQUIRED_FIELD` | A row is missing or has an empty/invalid required field; `missing_field` names it |
+| `DATA_INGESTION_READ_FAILED`            | CSV file exists but could not be read (encoding, I/O error)              |
+| `DATA_INGESTION_EMPTY`                  | CSV file exists and was read, but contains zero valid rows               |
 
 ---
 
@@ -222,11 +246,11 @@ exists yet on the response (see FUTURE).
 ## 11. Persistence
 
 - **Backend:** SQLite via `core/persistence.py`. Path: `/tmp/restaurant_ai_pipeline.db`
-  (overridable with `PIPELINE_DB_PATH` env var).
+  (overridable with `PIPELINE_DB_PATH` env var). When `DATABASE_URL` is set, Postgres
+  is used instead (R1).
 - **Scope:** Reads and writes are tenant-scoped by `restaurant_id` + `location_id`.
 - **Limitation:** SQLite on ephemeral disk (e.g. Render free tier) is not
   authoritative across restarts.
-- **Postgres:** Not yet implemented. `DATABASE_URL` is not read.
 
 ---
 
